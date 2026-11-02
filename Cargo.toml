@@ -1,0 +1,15 @@
+[package]
+name = "meshtadpole-meshcore-cli"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Host-side MeshCore node, daemon and CLI for the MeshTadpole SX1262 USB stick"
+rust-version = "1.85"
+
+[[bin]]
+name = "tadpole-mc"
+path = "src/main.rs"
+
+[dependencies]
+# Switch to git dependency once published.
+meshtadpole-radio = { path = "../meshtadpole-radio" }
