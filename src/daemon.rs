@@ -12,6 +12,7 @@
 //! - `{"cmd":"request","to":"<key>","kind":"status|telemetry|neighbours|acl|owner","password":".."}` -> parsed response.
 //! - `{"cmd":"cli","to":"<key>","command":"..","password":".."}` -> command reply text.
 //! - `{"cmd":"trace","path":"aabb,ccdd,aabb","wait_s":f}` -> per-hop SNR along the path.
+//! - `{"cmd":"path_reset","to":"<key>"}` -> forget the learned route to a node (next send floods).
 
 use crate::config::Config;
 use crate::decode::{Decoded, Keys, Status, decode_frame, to_json};
@@ -604,6 +605,17 @@ fn trace(sh: &Shared, req: &Value) -> Result<Value> {
     Ok(out)
 }
 
+fn path_reset(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let old = sh.out_paths.lock().unwrap().remove(&peer);
+    let c = store::open_rw(&sh.db)?;
+    c.execute(
+        "UPDATE nodes SET out_path=NULL, out_path_len=NULL, out_path_time=NULL WHERE public_key=?1",
+        meshtadpole_radio::store::rusqlite::params![hex::encode(peer)],
+    )?;
+    Ok(json!({"to": hex::encode(peer), "reset": true, "previous": old.map(|(l, p)| json!({"path_len": l, "path": hex::encode(p)}))}))
+}
+
 fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -638,6 +650,7 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "request" => request(sh, &req),
         "cli" => cli(sh, &req),
         "trace" => trace(sh, &req),
+        "path_reset" => path_reset(sh, &req),
         other => Err(anyhow!("unknown cmd {other:?}")),
     };
     let out = res.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
@@ -742,7 +755,37 @@ impl Mc {
                     out.push(self.job(mesh::ack(&body, &r), &r, &peer, data, 200));
                 }
             }
+            // Telemetry request from a peer (firmware companion onContactRequest): answer when base
+            // telemetry is allowed; the request's byte 1 is an inverse permission mask.
+            ptype::REQ if b.len() >= 6 && b[4] == repeater::REQ_TELEMETRY => {
+                let tc = &self.sh.cfg.node.telemetry;
+                let mut perms = 0u8;
+                if tc.base == "allow" {
+                    perms |= 1;
+                }
+                if tc.location == "allow" {
+                    perms |= 2;
+                }
+                perms &= !b[5];
+                if perms & 1 == 0 {
+                    return Ok(vec![]);
+                }
+                let n = &self.sh.cfg.node;
+                let gps = n.latitude.zip(n.longitude).filter(|_| perms & 2 != 0).map(|(a, o)| (a, o, 0.0));
+                let mut reply = b[..4].to_vec(); // reflect sender timestamp (tag)
+                reply.extend(repeater::lpp_telemetry(0.0, gps));
+                let data = json!({"reply": "telemetry", "location": gps.is_some()});
+                if p.is_flood() {
+                    let pk = mesh::path_return(&me, &peer, p.path_len, &p.path, Some((ptype::RESPONSE, &reply)), &flood)?;
+                    out.push(self.job(pk, &flood, &peer, data, 300));
+                } else {
+                    let r = direct_or_flood(&self.sh);
+                    let pk = mesh::datagram(ptype::RESPONSE, &me, &peer, &reply, &r)?;
+                    out.push(self.job(pk, &r, &peer, data, 300));
+                }
+            }
             ptype::PATH if !b.is_empty() => {
+
                 let l = b[0];
                 let n = (l & 63) as usize * ((l >> 6) as usize + 1);
                 if (l >> 6) < 3 && b.len() > n {

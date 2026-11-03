@@ -81,6 +81,24 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 
 ## Status
 
+| Feature | State |
+|---|---|
+| RX, decode all payload types, advert signatures, channel decryption, store | working |
+| Node table from adverts and DISCOVER, flood paths, last hop, duplicate linking | working |
+| Adverts (zero hop / flood), channel messages, echo tracking | working (on air) |
+| DMs with ACK, retries, path learning, automatic ACK / PATH replies | working (on air, direct neighbour; multi-hop flood DM to us not yet tested) |
+| Telemetry answers to requests addressed to us | implemented, not yet tested on air |
+| Repeater management: login, status, telemetry, neighbours, ACL, owner, remote CLI, bulk targets | working (on air, firmware 1.17.1 and 1.18.0) |
+| Learned route show / reset (`path`) | working |
+| TRACE (round trip, asymmetric), topology graph, DISCOVER | working (on air) |
+| Daemon: start without stick, reconnect, loop watchdog, stuck-receiver recovery | working (shared meshtadpole-radio) |
+| Linux (Ubuntu 26.04.1, kernel 7.0) | working: build, tests, RX, TX (discover, trace), reconnect on attach |
+| Room servers (login implemented; post sync, keep-alive) | not tested / not implemented |
+| Region-scoped floods (transport codes) TX, anonymous requests, GRP_DATA TX | not implemented (RX decoded) |
+| Remote CLI writes with dry run / read-back guard | not implemented (`cmd` sends as given) |
+
+Development phases:
+
 - Phase 1 (receive): decode and store of all payload types, advert signature verification, channel decryption, node table from adverts, flood path and last-hop recording.
 - Phase 2 (transmit): adverts (zero hop / flood), channel messages, DMs with ACK and retries, path learning from PATH returns, automatic ACK / PATH replies, echo tracking of our own packets.
 - Phase 3 (management): DISCOVER of direct neighbours, login, status/telemetry/neighbours/ACL/owner requests, remote CLI commands, bulk targets, report history (`node_reports`).

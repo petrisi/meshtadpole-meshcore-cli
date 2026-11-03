@@ -13,7 +13,7 @@ All output is JSON on stdout. Errors: `{"error": "..."}` on stderr, exit code 1 
 | `identity` | name, adv_type, public key, hash |
 | `identity --generate [--force]` | create key pair in the config file; refused if one exists unless `--force` (old identity lost) |
 
-Config keys: `node.{name, adv_type, private_key, latitude, longitude, duty_cycle_limit, duty_cycle_enforce, path_hash_size}`, `radio.{frequency_mhz, bandwidth_khz, spreading_factor, coding_rate, tx_power_dbm, rx_boosted_gain, agc_reset_interval_s}`, `channels` (array of `{name, key?}`; key base64 or hex, 16/32 bytes; omitted for `#name`), `api`, `usb_serial`, `groups.<name>` (node lists).
+Config keys: `node.{name, adv_type, private_key, latitude, longitude, duty_cycle_limit, duty_cycle_enforce, path_hash_size, telemetry.{base, location}}`, `radio.{frequency_mhz, bandwidth_khz, spreading_factor, coding_rate, tx_power_dbm, rx_boosted_gain, agc_reset_interval_s}`, `channels` (array of `{name, key?}`; key base64 or hex, 16/32 bytes; omitted for `#name`), `api`, `usb_serial`, `groups.<name>` (node lists).
 
 Example: add a private channel:
 `tadpole-mc config --set 'channels=[{"name":"Public","key":"izOH6cXN6mrJ5e26oRXNcg=="},{"name":"ops","key":"<base64>"}]'`
@@ -41,6 +41,7 @@ Floods we originate use `node.path_hash_size` (default 2, as observed on meshpir
 Automatic replies to frames addressed to us (first reception only):
 - Text message (plain or signed) from a known peer: ACK. Message received by flood: ACK inside a PATH return (flood), so the sender learns the route to us. Received direct: ACK along our learned path, else flood.
 - PATH from a peer: learned route stored (`nodes.out_path`); if it arrived by flood, a reciprocal PATH return is sent along the learned route.
+- Telemetry request (REQ type 0x03) from a known peer: answered as companion firmware does when `node.telemetry.base` = `allow` (default): voltage 0.0 V (the stick has no battery), plus GPS when `node.telemetry.location` = `allow` and latitude/longitude are set (default `deny`). The request's inverse permission mask is applied. Flood request: answer inside a PATH return; direct: RESPONSE along the learned path, else flood. Other request types are not answered (as firmware companions).
 - CLI messages: no ACK. Never repeats other nodes' packets.
 
 ## Management (repeaters, room servers; daemon required)
@@ -52,6 +53,7 @@ Passwords: config `passwords`, keyed by node name or public key prefix; redacted
 | `discover [--types repeater,room,chat,sensor] [--wait S]` | zero-hop DISCOVER_REQ; direct neighbours answer with full key, type and the SNR they hear us at (`snr_at_node_db`). Answering nodes are added to `nodes` (name from adverts or owner info later). Nodes may be configured not to answer, and the firmware rate-limits replies: one empty attempt does not prove absence; repeat after a while |
 | `login NODE [--password P]` | ANON_REQ login; result: ok, role (guest/read_only/read_write/admin), permissions, server_time, firmware_ver_level, rtt_ms. A wrong password gets no reply (`ok: false` after timeout). Login adds us to the node's ACL |
 | `request NODE status\|telemetry\|neighbours\|acl\|owner [--retries N]` | logs in first if not logged in this daemon session. status: RepeaterStats (batt_mv, noise_floor_dbm, packet/airtime counters, uptime_s, dups, errors). telemetry: Cayenne LPP sensors. neighbours: all pages, strongest first (key_prefix 6 bytes, heard_s_ago, snr_db). acl: key prefixes and roles (admin only). owner: firmware, name, owner_info (fills a missing node name) |
+| `path NODE [--reset]` | learned route to a node (`route`: `zero_hop` or hop hashes, `hops`, `hash_size`, `out_path_time`); `--reset` forgets it (daemon), so the next DM/request floods and the node's PATH return teaches a fresh route. Use when a direct route has gone stale |
 | `cmd NODE 'COMMAND' [--retries N] [--wait S]` | remote CLI (admin): e.g. `ver`, `clock`, `get radio`, `get repeat`, `set owner.info ...`, `neighbors`. Reply text returned. Default no retry (a retry executes again) |
 
 Routing: direct along the learned path when known (learned from the node's PATH return after a flooded login/request), else flood; the last retry floods. Requests use fresh timestamps (firmware replay protection). All results are stored in `node_reports`.

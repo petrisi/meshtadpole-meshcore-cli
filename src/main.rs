@@ -193,6 +193,13 @@ enum Cmd {
         #[arg(long)]
         sources: Option<String>,
     },
+    /// Learned route to a node (from its PATH return). --reset forgets it: the next send floods and
+    /// the node's PATH return teaches a fresh route.
+    Path {
+        node: String,
+        #[arg(long)]
+        reset: bool,
+    },
     /// Read-only SQL against the database. Rows as JSON array.
     Sql { query: String },
     /// Print the database schema (DDL).
@@ -612,7 +619,29 @@ fn run(cli: &Cli) -> Result<()> {
             }
             print(&v);
         }
+        Cmd::Path { node, reset } => {
+            let key = resolve_node(&db_path, node)?;
+            if *reset {
+                print(&daemon::call(&cfg.api, &json!({"cmd": "path_reset", "to": key}))?);
+            } else {
+                let c = store::open_ro(&db_path)?;
+                let row = store::query_json(&c, "SELECT public_key, name, out_path, out_path_len, out_path_time FROM nodes WHERE public_key=?1", &[&key])?;
+                let mut v = row.into_iter().next().unwrap_or(json!({"public_key": key}));
+                if let Some(l) = v["out_path_len"].as_u64() {
+                    let hs = ((l >> 6) + 1) as usize;
+                    let p = v["out_path"].as_str().unwrap_or_default().to_string();
+                    v["hops"] = json!(l & 63);
+                    v["hash_size"] = json!(hs);
+                    v["route"] = json!(if l & 63 == 0 { "zero_hop".to_string() } else { (0..p.len() / (hs * 2)).map(|i| &p[i * hs * 2..(i + 1) * hs * 2]).collect::<Vec<_>>().join(",") });
+                } else {
+                    v["route"] = json!(null);
+                    v["note"] = json!("no learned route: DMs and requests flood");
+                }
+                print(&v);
+            }
+        }
         Cmd::Sql { query } => {
+
 
 
             let c = store::open_ro(&db_path)?;

@@ -49,6 +49,23 @@ pub struct NodeConfig {
     /// Path hash size (1-3 bytes) requested for floods we originate (firmware path_hash_mode + 1).
     #[serde(default = "two")]
     pub path_hash_size: u8,
+    /// Answers to telemetry requests from other nodes (companion firmware behaviour).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+/// Telemetry permissions: "allow" or "deny". Base (battery; the stick has none, reported as 0.0 V like
+/// mains-powered nodes) must be allowed for any answer. Location is sent only when latitude/longitude are set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    pub base: String,
+    pub location: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        TelemetryConfig { base: "allow".into(), location: "deny".into() }
+    }
 }
 
 fn two() -> u8 {
@@ -101,6 +118,8 @@ impl Default for Config {
                 duty_cycle_limit: 0.10,
                 duty_cycle_enforce: true,
                 path_hash_size: 2,
+                telemetry: TelemetryConfig::default(),
+
             },
             radio: RadioConfig {
                 frequency_mhz: 869.618,

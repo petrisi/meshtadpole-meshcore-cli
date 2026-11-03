@@ -94,6 +94,20 @@ pub fn parse_login(b: &[u8]) -> Value {
     })
 }
 
+/// Cayenne LPP encoding of our telemetry answer: voltage (ch 1) and optional GPS (ch 1).
+pub fn lpp_telemetry(voltage_v: f64, gps: Option<(f64, f64, f64)>) -> Vec<u8> {
+    let mut b = vec![1, 116];
+    b.extend(((voltage_v * 100.0).round().clamp(0.0, 65535.0) as u16).to_be_bytes());
+    if let Some((lat, lon, alt)) = gps {
+        b.extend([1, 136]);
+        for (v, scale) in [(lat, 1e4), (lon, 1e4), (alt, 100.0)] {
+            let x = (v * scale).round() as i32;
+            b.extend(&x.to_be_bytes()[1..]);
+        }
+    }
+    b
+}
+
 /// RepeaterStats (56 bytes after the tag).
 pub fn parse_status(b: &[u8]) -> Result<Value, String> {
     let s = &b[4..];
@@ -219,7 +233,18 @@ mod tests {
     }
 
     #[test]
+    fn lpp_roundtrip() {
+        let b = lpp_telemetry(0.0, Some((61.4567, 23.8123, 120.0)));
+        let v = parse_lpp(&b);
+        assert_eq!(v[0]["value"], 0.0);
+        assert_eq!(v[1]["value"]["latitude"], 61.4567);
+        assert_eq!(v[1]["value"]["longitude"], 23.8123);
+        assert_eq!(v[1]["value"]["altitude_m"], 120.0);
+    }
+
+    #[test]
     fn lpp_ignores_padding() {
+
         let b = [1, 116, 0x01, 0x9C, 0, 0, 0, 0, 0, 0];
         assert_eq!(parse_lpp(&b).as_array().unwrap().len(), 1);
     }
