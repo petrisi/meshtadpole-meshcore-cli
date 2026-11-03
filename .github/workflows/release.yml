@@ -1,0 +1,55 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            suffix: x86_64-linux
+          - os: windows-latest
+            suffix: x86_64-windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+      - run: cargo build --release --locked
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          d=tadpole-mc-${GITHUB_REF_NAME}-${{ matrix.suffix }}
+          mkdir "$d"
+          cp target/release/tadpole-mc README.md LICENSE "$d"/
+          cp -r docs "$d"/
+          tar czf "$d.tar.gz" "$d"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $d = "tadpole-mc-$env:GITHUB_REF_NAME-${{ matrix.suffix }}"
+          New-Item -ItemType Directory $d | Out-Null
+          Copy-Item target/release/tadpole-mc.exe, README.md, LICENSE $d
+          Copy-Item docs $d -Recurse
+          Compress-Archive $d "$d.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.suffix }}
+          path: |
+            *.tar.gz
+            *.zip
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" tadpole-mc-* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

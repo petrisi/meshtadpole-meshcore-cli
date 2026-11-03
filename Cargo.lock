@@ -509,6 +509,7 @@ dependencies = [
 [[package]]
 name = "meshtadpole-radio"
 version = "0.1.0"
+source = "git+https://github.com/petrisi/meshtadpole-radio#de280836ecdf9c42d612f27363fd2a3c504e55af"
 dependencies = [
  "hex",
  "rusb",
