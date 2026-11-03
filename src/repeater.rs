@@ -9,7 +9,7 @@ pub const REQ_ACL: u8 = 0x05;
 pub const REQ_NEIGHBOURS: u8 = 0x06;
 pub const REQ_OWNER: u8 = 0x07;
 
-/// Anonymous requests (ANON_REQ, no login; repeater firmware 1.18, direct route only).
+/// Anonymous requests (ANON_REQ, no login; repeaters, firmware 1.17.1 and 1.18.0 on air; direct route only).
 pub const ANON_REGIONS: u8 = 0x01;
 pub const ANON_OWNER: u8 = 0x02;
 pub const ANON_CLOCK: u8 = 0x03;

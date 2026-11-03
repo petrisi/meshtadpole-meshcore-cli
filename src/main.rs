@@ -104,8 +104,8 @@ enum Cmd {
         wait: Option<f64>,
     },
     /// Anonymous request to a repeater, no login: regions (region names allowing flood, `*` =
-    /// unscoped), owner (name and owner info), clock (node clock and feature flags). Repeater firmware
-    /// >= 1.18; sent direct only (learned path or zero hop), rate limited by the repeater.
+    /// unscoped), owner (name and owner info), clock (node clock and feature flags). Repeaters only;
+    /// sent direct only (learned path or zero hop; `path --set` for others), rate limited by the repeater.
     Anon {
         node: String,
         kind: String,
@@ -247,11 +247,14 @@ enum Cmd {
         sources: Option<String>,
     },
     /// Learned route to a node (from its PATH return). --reset forgets it: the next send floods and
-    /// the node's PATH return teaches a fresh route.
+    /// the node's PATH return teaches a fresh route. --set HASHES sets it by hand (repeater hashes in
+    /// order from us, e.g. `5b5f,3133`; `""` = zero hop), e.g. from the reverse of an advert's path.
     Path {
         node: String,
         #[arg(long)]
         reset: bool,
+        #[arg(long, conflicts_with = "reset")]
+        set: Option<String>,
     },
     /// Read-only SQL against the database. Rows as JSON array.
     Sql { query: String },
@@ -731,9 +734,12 @@ fn run(cli: &Cli) -> Result<()> {
             }
             print(&v);
         }
-        Cmd::Path { node, reset } => {
+        Cmd::Path { node, reset, set } => {
             let key = resolve_node(&db_path, node)?;
-            if *reset {
+            if let Some(p) = set {
+                print(&daemon::call(&cfg.api, &json!({"cmd": "path_set", "to": key, "path": p}))?);
+            } else if *reset {
+
                 print(&daemon::call(&cfg.api, &json!({"cmd": "path_reset", "to": key}))?);
             } else {
                 let c = store::open_ro(&db_path)?;

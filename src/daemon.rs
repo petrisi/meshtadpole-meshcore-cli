@@ -13,6 +13,7 @@
 //! - `{"cmd":"cli","to":"<key>","command":"..","password":".."}` -> command reply text.
 //! - `{"cmd":"trace","path":"aabb,ccdd,aabb","wait_s":f}` -> per-hop SNR along the path.
 //! - `{"cmd":"path_reset","to":"<key>"}` -> forget the learned route to a node (next send floods).
+//! - `{"cmd":"path_set","to":"<key>","path":"aabb,ccdd"}` -> set the route (repeater hashes from us; "" = zero hop).
 //! - `{"cmd":"anon_request","to":"<key>","kind":"regions|owner|clock"}` -> repeater answer without login.
 //! - `{"cmd":"send_channel_data","channel":"<name>","data_type":n,"data_hex":".."}` -> channel datagram.
 //! - `{"cmd":"leave_room","to":"<key>"}` -> stop room keep-alive / re-login.
@@ -786,7 +787,7 @@ fn anon_request(sh: &Shared, req: &Value) -> Result<Value> {
         }
     }
     out["ok"] = json!(false);
-    out["error"] = json!("no reply (repeaters with firmware >= 1.18 only; must be a direct neighbour or have a learned path; rate limited)");
+    out["error"] = json!("no reply (repeaters only; must be a direct neighbour or have a route: learned or `path --set`; rate limited)");
     out["transmissions"] = json!(txs);
     Ok(out)
 }
@@ -902,7 +903,33 @@ fn keep_room(sh: &Shared, peer: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
-fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
+/// Set the route to a node by hand: repeater hashes in order from us (equal size 1-3 bytes), "" = zero hop.
+/// Replaced by the next learned PATH from that node.
+fn path_set(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let spec = req["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
+    let hops: Vec<Vec<u8>> = spec.split(',').map(str::trim).filter(|h| !h.is_empty()).map(hex::decode).collect::<Result<_, _>>().map_err(|e| anyhow!("path: {e}"))?;
+    let hs = hops.first().map(Vec::len).unwrap_or(sh.cfg.node.path_hash_size as usize);
+    if !(1..=3).contains(&hs) || hops.iter().any(|h| h.len() != hs) || hops.len() * hs > crate::packet::MAX_PATH_SIZE || hops.len() > 63 {
+        bail!("path: hashes of equal size 1-3 bytes, at most 64 bytes");
+    }
+    let path_len = (((hs - 1) as u8) << 6) | hops.len() as u8;
+    let path = hops.concat();
+    let c = store::open_rw(&sh.db)?;
+    let n = c.execute(
+        "UPDATE nodes SET out_path=?2, out_path_len=?3, out_path_time=?4 WHERE public_key=?1",
+        meshtadpole_radio::store::rusqlite::params![hex::encode(peer), hex::encode(&path), path_len, store::now()],
+    )?;
+    if n == 0 {
+        bail!("node not in the node table");
+    }
+    let old = sh.out_paths.lock().unwrap().insert(peer, (path_len, path.clone()));
+    Ok(json!({"to": hex::encode(peer), "set": true, "path_len": path_len, "path": hex::encode(&path),
+        "previous": old.map(|(l, p)| json!({"path_len": l, "path": hex::encode(p)}))}))
+}
+
+fn handle_line(line: &str
+, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => return writeln!(w, "{}", json!({"error": format!("bad request: {e}")})),
@@ -940,6 +967,7 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "cli" => cli(sh, &req),
         "trace" => trace(sh, &req),
         "path_reset" => path_reset(sh, &req),
+        "path_set" => path_set(sh, &req),
         "anon_request" => anon_request(sh, &req),
         "send_channel_data" => send_channel_data(sh, &req),
         "leave_room" => leave_room(sh, &req),
