@@ -213,6 +213,11 @@ impl Writer {
         Ok((id, dup_of))
     }
 
+    /// Reception time of a stored frame.
+    pub fn rx_time(&self, id: i64) -> Result<f64> {
+        Ok(self.s.c.query_row("SELECT rx_time FROM rx_frames WHERE id=?1", [id], |r| r.get(0))?)
+    }
+
     fn update_node(&self, t: f64, frame_id: i64, f: &RxFrame, d: &Decoded, first: bool, path: Option<&str>) -> Result<()> {
         let (Some(key), Some(v), Some(p)) = (&d.src_key, &d.data, &d.packet) else { return Ok(()) };
         let route = crate::packet::route_name(p.route());

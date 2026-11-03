@@ -894,8 +894,17 @@ impl link::Handler for Mc {
             }
         }
         sh.notify(&ack_codes(&d), d.pkt_hash.as_deref(), &sigs, &ev);
-        if dup_of.is_some() || d.status != Status::Ok {
+        if d.status != Status::Ok {
             return Ok(vec![]);
+        }
+        if let Some(orig) = dup_of {
+            // An identical text message long after the first copy is a resend (e.g. a room server pushing a
+            // post again after re-login; its random attempt bits repeat 1 in 4): the sender wants an ACK.
+            // Copies within 30 s are flood duplicates.
+            let text = d.packet.as_ref().is_some_and(|p| p.ptype() == ptype::TXT_MSG);
+            if !text || self.w.rx_time(orig)? > t - 30.0 {
+                return Ok(vec![]);
+            }
         }
         Ok(self.respond(&d)?)
     }
