@@ -71,7 +71,6 @@ impl Identity {
     }
 
     /// Ed25519 signature with the expanded key.
-    #[allow(dead_code)] // TX (adverts)
     pub fn sign(&self, msg: &[u8]) -> [u8; 64] {
         let esk = ed25519_dalek::hazmat::ExpandedSecretKey::from_bytes(&self.prv);
         let vk = VerifyingKey::from_bytes(&self.public).expect("own public key");
@@ -120,7 +119,6 @@ pub fn mac_then_decrypt(secret: &[u8; 32], src: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-#[allow(dead_code)] // TX
 /// AES-128-ECB encrypt (zero padding) then MAC. Output: MAC(2) || ciphertext.
 pub fn encrypt_then_mac(secret: &[u8; 32], plain: &[u8]) -> Vec<u8> {
     let c = Aes128::new(GenericArray::from_slice(&secret[..16]));

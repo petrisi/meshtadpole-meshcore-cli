@@ -13,7 +13,7 @@ All output is JSON on stdout. Errors: `{"error": "..."}` on stderr, exit code 1 
 | `identity` | name, adv_type, public key, hash |
 | `identity --generate [--force]` | create key pair in the config file; refused if one exists unless `--force` (old identity lost) |
 
-Config keys: `node.{name, adv_type, private_key, latitude, longitude, duty_cycle_limit, duty_cycle_enforce}`, `radio.{frequency_mhz, bandwidth_khz, spreading_factor, coding_rate, tx_power_dbm, rx_boosted_gain, agc_reset_interval_s}`, `channels` (array of `{name, key?}`; key base64 or hex, 16/32 bytes; omitted for `#name`), `api`, `usb_serial`, `groups.<name>` (node lists).
+Config keys: `node.{name, adv_type, private_key, latitude, longitude, duty_cycle_limit, duty_cycle_enforce, path_hash_size}`, `radio.{frequency_mhz, bandwidth_khz, spreading_factor, coding_rate, tx_power_dbm, rx_boosted_gain, agc_reset_interval_s}`, `channels` (array of `{name, key?}`; key base64 or hex, 16/32 bytes; omitted for `#name`), `api`, `usb_serial`, `groups.<name>` (node lists).
 
 Example: add a private channel:
 `tadpole-mc config --set 'channels=[{"name":"Public","key":"izOH6cXN6mrJ5e26oRXNcg=="},{"name":"ops","key":"<base64>"}]'`
@@ -26,7 +26,22 @@ Example: add a private channel:
 | `status` | pid, session, radio state, USB serial, radio parameters, frames, known peer keys, TX airtime last hour |
 | `listen [--ok-only] [--seconds N]` | NDJSON frame events (same fields as `decode` plus frame_id, rx_time, rssi, snr, freq_error_hz, len, airtime_ms, dup_of) |
 
-API: TCP, one JSON object per line. `{"cmd":"status"}`, `{"cmd":"subscribe"}`.
+API: TCP, one JSON object per line: `status`, `subscribe`, `advert`, `send_text`, `send_channel` (see `src/daemon.rs` header). Requests that transmit are logged in `requests`.
+
+## Transmit (daemon required)
+
+| Command | Effect |
+|---|---|
+| `advert [--flood] [--wait S]` | signed advert (name, type, optional location). Default zero hop (not repeated); `--flood` propagates. Returns transmission and `echoes`: copies repeated by repeaters that we heard (path, last_hop, rssi, snr) |
+| `send '#name'\|ch:NAME TEXT [--wait S]` | channel message as `<node.name>: TEXT` (flood, no ACK); returns echoes |
+| `send NODE TEXT [--flood] [--retries N] [--wait S]` | DM to a node known from adverts (name, key or prefix). Direct along the learned path if any, else flood; last retry always floods. Waits firmware ACK timeout (flood 500 ms + 16 x airtime; direct 500 ms + (6 x airtime + 250 ms) x (hops + 1)) plus `--wait` (default 3 s). Returns acked, ack_attempt, rtt_ms, ack path/rssi/snr, transmissions, echoes, out_path |
+
+Floods we originate use `node.path_hash_size` (default 2, as observed on meshpirkanmaa) and no region scope. Max text 160 bytes (channel: including `name: `). Duty cycle enforced (`node.duty_cycle_limit`).
+
+Automatic replies to frames addressed to us (first reception only):
+- Text message (plain or signed) from a known peer: ACK. Message received by flood: ACK inside a PATH return (flood), so the sender learns the route to us. Received direct: ACK along our learned path, else flood.
+- PATH from a peer: learned route stored (`nodes.out_path`); if it arrived by flood, a reciprocal PATH return is sent along the learned route.
+- CLI messages: no ACK. Never repeats other nodes' packets.
 
 ## Queries (read-only, daemon not required)
 

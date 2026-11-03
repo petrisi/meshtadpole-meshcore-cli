@@ -141,7 +141,6 @@ impl Packet {
         Ok(Packet { header, transport_codes, path_len, path, payload })
     }
 
-    #[allow(dead_code)] // TX
     pub fn encode(&self) -> Vec<u8> {
         let mut o = vec![self.header];
         if let Some([a, b]) = self.transport_codes {

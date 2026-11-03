@@ -2,6 +2,7 @@ mod config;
 mod crypto;
 mod daemon;
 mod decode;
+mod mesh;
 mod packet;
 mod store;
 
@@ -57,6 +58,29 @@ enum Cmd {
     },
     /// Run the daemon in the foreground (owns the radio, writes the DB, serves the API).
     Daemon,
+    /// Transmit our signed advert. Default zero hop (direct neighbours only); --flood to propagate.
+    Advert {
+        #[arg(long)]
+        flood: bool,
+        /// Seconds to collect echoes (repeaters relaying our advert) [default: 5 zero hop, 15 flood].
+        #[arg(long)]
+        wait: Option<f64>,
+    },
+    /// Send a text. TO: `#name` or a configured channel name prefixed `ch:` (channel message, no ACK),
+    /// else a node name, public key or key prefix (DM with ACK; direct when a path is known, else flood).
+    Send {
+        to: String,
+        text: String,
+        /// DM: always flood (ignore learned path).
+        #[arg(long)]
+        flood: bool,
+        /// DM: retransmissions without ACK (last attempt floods).
+        #[arg(long, default_value_t = 2)]
+        retries: u32,
+        /// Channel: seconds to collect echoes. DM: extra seconds added to the firmware ACK timeout.
+        #[arg(long)]
+        wait: Option<f64>,
+    },
     /// Daemon status.
     Status,
     /// Stream received frames from the daemon as NDJSON.
@@ -165,6 +189,21 @@ fn identity_json(cfg: &Config) -> Result<Value> {
     }))
 }
 
+/// Node name, full key or key prefix -> full public key (hex). Must be unique.
+fn resolve_node(db: &std::path::Path, id: &str) -> Result<String> {
+    let key = id.to_lowercase();
+    if key.len() == 64 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(key);
+    }
+    let c = store::open_ro(db)?;
+    let rows = store::query_json(&c, "SELECT public_key, name FROM nodes WHERE name = ?2 OR (length(?1) >= 2 AND public_key LIKE ?1 || '%')", &[&key, &id])?;
+    match rows.len() {
+        1 => Ok(rows[0]["public_key"].as_str().unwrap_or_default().to_string()),
+        0 => bail!("node not found: {id} (known from adverts only)"),
+        n => bail!("ambiguous: {n} nodes match {id}: {}", json!(rows)),
+    }
+}
+
 fn run(cli: &Cli) -> Result<()> {
     let (cfg_path, db_path) = paths(cli);
     let cfg = Config::load(&cfg_path)?;
@@ -201,6 +240,9 @@ fn run(cli: &Cli) -> Result<()> {
                 cfg.lora()?;
                 cfg.channels()?;
                 config::adv_type_code(&cfg.node.adv_type)?;
+                if !(1..=3).contains(&cfg.node.path_hash_size) {
+                    bail!("node.path_hash_size must be 1..3");
+                }
             }
             if *write || !set.is_empty() {
                 cfg.save(&cfg_path)?;
@@ -239,6 +281,41 @@ fn run(cli: &Cli) -> Result<()> {
             }
         }
         Cmd::Daemon => daemon::run(&cfg, &db_path)?,
+        Cmd::Advert { flood, wait } => {
+            let mut req = json!({"cmd": "advert", "flood": flood});
+            if let Some(w) = wait {
+                req["wait_s"] = json!(w);
+            }
+            print(&daemon::call(&cfg.api, &req)?);
+        }
+        Cmd::Send { to, text, flood, retries, wait } => {
+            let channel = if to.starts_with('#') {
+                Some(to.clone())
+            } else {
+                to.strip_prefix("ch:").map(String::from)
+            };
+            let req = match channel {
+                Some(ch) => {
+                    if !cfg.channels.iter().any(|c| c.name == ch) {
+                        bail!("channel {ch} not configured");
+                    }
+                    let mut r = json!({"cmd": "send_channel", "channel": ch, "text": text});
+                    if let Some(w) = wait {
+                        r["wait_s"] = json!(w);
+                    }
+                    r
+                }
+                None => {
+                    let key = resolve_node(&db_path, to)?;
+                    let mut r = json!({"cmd": "send_text", "to": key, "text": text, "retries": retries, "flood": flood});
+                    if let Some(w) = wait {
+                        r["extra_wait_s"] = json!(w);
+                    }
+                    r
+                }
+            };
+            print(&daemon::call(&cfg.api, &req)?);
+        }
         Cmd::Status => print(&daemon::call(&cfg.api, &json!({"cmd": "status"}))?),
         Cmd::Listen { ok_only, seconds } => {
             let mut s = daemon::connect(&cfg.api)?;
@@ -313,7 +390,7 @@ fn run(cli: &Cli) -> Result<()> {
                        adverts_heard, receptions, first_heard, last_heard,
                        CAST(strftime('%s','now') AS REAL) - last_heard AS age_s,
                        last_rssi, last_snr, last_route, last_path_hops, last_path,
-                       last_direct_heard, last_direct_rssi, last_direct_snr
+                       last_direct_heard, last_direct_rssi, last_direct_snr, out_path, out_path_len, out_path_time
                      FROM nodes WHERE last_heard > ?1 AND (?2 IS NULL OR adv_type = ?2) ORDER BY last_heard DESC";
             print(&json!(store::query_json(&c, q, &[&cutoff, adv_type])?));
         }

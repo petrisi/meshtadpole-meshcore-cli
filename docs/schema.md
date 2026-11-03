@@ -1,6 +1,6 @@
 # Database schema
 
-SQLite, WAL mode. `meta.schema_version` = 1. Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
+SQLite, WAL mode. `meta.schema_version` = 2 (v1 databases are migrated on daemon start). Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
 
 Common tables (`sessions`, `radio_stats`, `radio_events`, `requests`) come from `meshtadpole-radio` and have the same meaning as in `tadpole-mt`:
 
@@ -32,6 +32,7 @@ Every reception, including errors and duplicates. Source of truth.
 | channel | matched channel name (GRP_TXT, GRP_DATA) |
 | data_json | decoded payload, see below |
 | dup_of | id of the first reception with the same pkt_hash within 1 h; NULL = first |
+| tx_id | our own transmission (tx_frames.id) this frame is a repeat of; NULL = not ours |
 
 Status values:
 - `ok`: parsed; decrypted where applicable.
@@ -71,10 +72,13 @@ One row per public key, from verified adverts.
 | adverts_heard, receptions | distinct adverts; all copies |
 | last_rssi, last_snr, last_route, last_path_hops, last_path | last received copy |
 | last_direct_heard, last_direct_rssi, last_direct_snr | last copy with 0 hops (heard directly from the node) |
+| out_path, out_path_len, out_path_time | route to the node learned from its PATH return: path bytes (hex), raw path_len byte (bits 0-5 hops, 6-7 hash size - 1), time |
+
+Our own adverts heard back are stored in rx_frames (with tx_id) but not as a node.
 
 ## tx_frames
 
-Every transmission by this node (from phase 2): raw, len, airtime_ms, route, payload_type, pkt_hash, dest, data_json, attempt, error.
+Every transmission by this node, including automatic replies: raw, len, airtime_ms, route (`flood`, `direct`, `zero_hop`), payload_type, pkt_hash, dest (peer key or channel name), data_json (what was sent; automatic replies: `reply`), attempt, error (e.g. duty cycle refusal). Repeats heard: `SELECT * FROM rx_frames WHERE tx_id = ?`.
 
 ## Views
 

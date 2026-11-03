@@ -79,11 +79,13 @@ pub struct Decoded {
     pub channel: Option<String>,
     pub data: Option<Value>,
     pub error: Option<String>,
+    /// Decrypted peer payload (daemon-internal, never stored raw): peer key, direction in/out, plaintext.
+    pub peer_plain: Option<([u8; 32], &'static str, Vec<u8>)>,
 }
 
 impl Decoded {
     fn new(status: Status) -> Decoded {
-        Decoded { status, packet: None, pkt_hash: None, src_key: None, src_hash: None, dest_hash: None, channel: None, data: None, error: None }
+        Decoded { status, packet: None, pkt_hash: None, src_key: None, src_hash: None, dest_hash: None, channel: None, data: None, error: None, peer_plain: None }
     }
 }
 
@@ -231,6 +233,7 @@ fn decode_payload(p: &Packet, keys: &Keys, d: &mut Decoded) {
                             d.error = Some(e);
                         }
                     }
+                    d.peer_plain = Some((peer, dir, plain));
                 }
                 None => d.status = Status::Encrypted,
             }
@@ -396,7 +399,7 @@ fn peer_plain(t: u8, b: &[u8]) -> Result<Value, String> {
                 return Err("bad path encoding".into());
             }
             let path: Vec<String> = b[1..1 + n].chunks(hs).map(hex::encode).collect();
-            json!({"path": path, "hash_size": hs, "extra_type": ptype_name(b[1 + n] & 0x0F), "extra_hex": hex::encode(&b[2 + n..])})
+            json!({"path": path, "path_len_raw": pl, "hash_size": hs, "extra_type": ptype_name(b[1 + n] & 0x0F), "extra_hex": hex::encode(&b[2 + n..])})
         }
         _ => json!({"timestamp": ts, "data_hex": hex::encode(&b[4..])}),
     })

@@ -46,6 +46,13 @@ pub struct NodeConfig {
     pub duty_cycle_limit: f64,
     #[serde(default = "yes")]
     pub duty_cycle_enforce: bool,
+    /// Path hash size (1-3 bytes) requested for floods we originate (firmware path_hash_mode + 1).
+    #[serde(default = "two")]
+    pub path_hash_size: u8,
+}
+
+fn two() -> u8 {
+    2
 }
 
 fn yes() -> bool {
@@ -89,6 +96,7 @@ impl Default for Config {
                 longitude: None,
                 duty_cycle_limit: 0.10,
                 duty_cycle_enforce: true,
+                path_hash_size: 2,
             },
             radio: RadioConfig {
                 frequency_mhz: 869.618,

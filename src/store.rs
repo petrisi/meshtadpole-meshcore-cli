@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub use meshtadpole_radio::store::{COMMON_SCHEMA, now};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS rx_frames(
@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS rx_frames(
   channel TEXT,
   data_json TEXT,
   error TEXT,
-  dup_of INTEGER
+  dup_of INTEGER,
+  tx_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS rx_frames_time ON rx_frames(rx_time);
 CREATE INDEX IF NOT EXISTS rx_frames_hash ON rx_frames(pkt_hash, rx_time);
@@ -48,7 +49,8 @@ CREATE TABLE IF NOT EXISTS nodes(
   first_heard REAL, last_heard REAL, last_frame_id INTEGER,
   adverts_heard INTEGER NOT NULL DEFAULT 0, receptions INTEGER NOT NULL DEFAULT 0,
   last_rssi REAL, last_snr REAL, last_route TEXT, last_path_hops INTEGER, last_path TEXT,
-  last_direct_heard REAL, last_direct_rssi REAL, last_direct_snr REAL
+  last_direct_heard REAL, last_direct_rssi REAL, last_direct_snr REAL,
+  out_path TEXT, out_path_len INTEGER, out_path_time REAL
 );
 CREATE INDEX IF NOT EXISTS nodes_hash ON nodes(hash);
 
@@ -66,7 +68,7 @@ CREATE INDEX IF NOT EXISTS tx_frames_time ON tx_frames(tx_time);
 CREATE VIEW IF NOT EXISTS v_packets AS
 SELECT f.id, f.rx_time, datetime(f.rx_time,'unixepoch') AS rx_utc, f.status, f.route, f.payload_type,
   f.path_hops, f.path, f.last_hop, f.src_hash, f.dest_hash, f.src_key, n.name AS src_name, f.channel,
-  f.rssi, f.snr, f.len, f.airtime_ms, f.pkt_hash, f.data_json, f.dup_of
+  f.rssi, f.snr, f.len, f.airtime_ms, f.pkt_hash, f.data_json, f.dup_of, f.tx_id
 FROM rx_frames f LEFT JOIN nodes n ON n.public_key = f.src_key;
 
 CREATE VIEW IF NOT EXISTS v_adverts AS
@@ -94,7 +96,29 @@ pub fn full_schema() -> String {
     format!("{}\n{}", COMMON_SCHEMA.trim(), SCHEMA.trim())
 }
 
+/// Columns added after schema v1 (table, column, type).
+const ADDED: &[(&str, &str, &str)] = &[
+    ("nodes", "out_path", "TEXT"),
+    ("nodes", "out_path_len", "INTEGER"),
+    ("nodes", "out_path_time", "REAL"),
+    ("rx_frames", "tx_id", "INTEGER"),
+];
+
 pub fn open_rw(path: &Path) -> Result<Connection> {
+    // Migrate before the tool schema runs (views reference new columns).
+    if path.exists() {
+        let c = Connection::open(path)?;
+        for (t, col, ty) in ADDED {
+            let has: bool = c
+                .prepare(&format!("SELECT 1 FROM pragma_table_info('{t}') WHERE name='{col}'"))?
+                .exists([])?;
+            let table: bool = c.prepare(&format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{t}'"))?.exists([])?;
+            if table && !has {
+                c.execute_batch(&format!("ALTER TABLE {t} ADD COLUMN {col} {ty}"))?;
+            }
+        }
+        c.execute_batch("DROP VIEW IF EXISTS v_packets")?;
+    }
     meshtadpole_radio::store::open_rw(path, SCHEMA, SCHEMA_VERSION).map_err(|e| anyhow!(e))
 }
 
@@ -108,6 +132,8 @@ pub fn query_json(c: &Connection, sql: &str, args: &[&dyn rusqlite::ToSql]) -> R
 
 pub struct Writer {
     pub s: Session,
+    /// Our public key (hex): our own adverts heard back are stored as frames but not as a node.
+    pub me: Option<String>,
 }
 
 impl Writer {
@@ -153,7 +179,14 @@ impl Writer {
             ],
         )?;
         let id = self.s.c.last_insert_rowid();
-        if d.status == Status::Ok && p.is_some_and(|p| p.ptype() == ptype::ADVERT) {
+        // Echo of our own transmission (repeated by a repeater): same packet hash as a recent tx_frames row.
+        if let (Some(h), true) = (&d.pkt_hash, trusted) {
+            self.s.c.execute(
+                "UPDATE rx_frames SET tx_id=(SELECT id FROM tx_frames WHERE pkt_hash=?1 AND tx_time>?2 ORDER BY id LIMIT 1) WHERE id=?3",
+                params![h, t - 3600.0, id],
+            )?;
+        }
+        if d.status == Status::Ok && p.is_some_and(|p| p.ptype() == ptype::ADVERT) && d.src_key != self.me {
             self.update_node(t, id, f, d, dup_of.is_none(), path.as_deref())?;
         }
         Ok((id, dup_of))
@@ -187,6 +220,40 @@ impl Writer {
         )?;
         Ok(())
     }
+}
+
+impl Writer {
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_tx(
+        &self, t: f64, raw: &[u8], airtime_ms: f64, route: &str, payload_type: &str, pkt_hash: &str, dest: Option<&str>,
+        data: &Value, attempt: u32, error: Option<&str>,
+    ) -> Result<i64> {
+        self.s.c.execute(
+            "INSERT INTO tx_frames(session_id,tx_time,raw,len,airtime_ms,route,payload_type,pkt_hash,dest,data_json,attempt,error)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![self.s.id, t, raw, raw.len(), airtime_ms, route, payload_type, pkt_hash, dest, data.to_string(), attempt, error],
+        )?;
+        Ok(self.s.c.last_insert_rowid())
+    }
+
+    /// Learned route to a peer (from its PATH return). path_len = raw byte.
+    pub fn set_out_path(&self, key: &str, path_len: u8, path: &[u8]) -> Result<()> {
+        self.s.c.execute(
+            "UPDATE nodes SET out_path=?2,out_path_len=?3,out_path_time=?4 WHERE public_key=?1",
+            params![key, hex::encode(path), path_len, now()],
+        )?;
+        Ok(())
+    }
+}
+
+/// Learned out paths: (public key, raw path_len, path bytes).
+pub fn load_out_paths(c: &Connection) -> Result<Vec<([u8; 32], u8, Vec<u8>)>> {
+    let mut st = c.prepare("SELECT public_key, out_path_len, out_path FROM nodes WHERE out_path_len IS NOT NULL")?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?, r.get::<_, String>(2)?)))?;
+    Ok(rows
+        .flatten()
+        .filter_map(|(k, l, p)| Some((<[u8; 32]>::try_from(hex::decode(k).ok()?.as_slice()).ok()?, l, hex::decode(p).ok()?)))
+        .collect())
 }
 
 /// Known peer public keys (for decrypting messages to us).

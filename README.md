@@ -21,6 +21,9 @@ tadpole-mc listen --seconds 60     # NDJSON frame stream
 tadpole-mc nodes --type repeater
 tadpole-mc packets --type GRP_TXT --since 3600
 tadpole-mc sql "SELECT * FROM v_heard_repeaters ORDER BY last_heard DESC"
+tadpole-mc advert --flood          # announce us; echoes show which repeaters relayed it
+tadpole-mc send '#test' 'hello'    # channel message
+tadpole-mc send 'Node name' 'hi'   # DM with ACK
 ```
 
 Files: `<data dir>/meshtadpole/meshcore.json` (config, contains the private key) and `meshcore.db`. Data dir: `%LOCALAPPDATA%` (Windows), `~/.local/share` (Linux). Override with `--config`/`--db` or `TADPOLE_MC_CONFIG`/`TADPOLE_MC_DB`.
@@ -53,7 +56,9 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 
 ## Status
 
-Phase 1 (receive): decode and store of all payload types, advert signature verification, channel decryption, node table from adverts, flood path and last-hop recording. Transmit, repeater/room management and diagnostics follow.
+- Phase 1 (receive): decode and store of all payload types, advert signature verification, channel decryption, node table from adverts, flood path and last-hop recording.
+- Phase 2 (transmit): adverts (zero hop / flood), channel messages, DMs with ACK and retries, path learning from PATH returns, automatic ACK / PATH replies, echo tracking of our own packets.
+- Next: repeater/room management, diagnostics (TRACE, DISCOVER, topology).
 
 ## License
 
