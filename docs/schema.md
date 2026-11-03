@@ -1,6 +1,6 @@
 # Database schema
 
-SQLite, WAL mode. `meta.schema_version` = 3 (older databases are migrated on daemon start). Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
+SQLite, WAL mode. `meta.schema_version` = 4 (older databases are migrated on daemon start). Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
 
 Common tables (`sessions`, `radio_stats`, `radio_events`, `requests`) come from `meshtadpole-radio` and have the same meaning as in `tadpole-mt`:
 
@@ -78,11 +78,16 @@ Our own adverts heard back are stored in rx_frames (with tx_id) but not as a nod
 
 ## node_reports
 
-Management results, one row per successful login/request/CLI command: t, public_key, kind (`login`, `status`, `telemetry`, `neighbours`, `acl`, `owner`, `cli`, `trace` with empty public_key), data_json (parsed result as returned by the CLI). Nodes added by DISCOVER have no name until an advert or owner report.
+Management results, one row per successful login/request/CLI command: t, public_key, kind (`login`, `status`, `telemetry`, `neighbours`, `acl`, `owner`, `cli`, `anon_regions`, `anon_owner`, `anon_clock`, `trace` with empty public_key), data_json (parsed result as returned by the CLI). Nodes added by DISCOVER have no name until an advert or owner report.
+
+## rooms
+
+Room servers joined by a successful room login (schema 4): public_key, active (0 after `leave`), joined, sync_since (latest post timestamp received, room clock; posts newer than this are pushed), last_login, last_keepalive_ok, last_post. Maintained by the daemon (keep-alive, re-login); see `docs/cli.md` Rooms.
 
 ## tx_frames
 
-Every transmission by this node, including automatic replies: raw, len, airtime_ms, route (`flood`, `direct`, `zero_hop`), payload_type, pkt_hash, dest (peer key or channel name), data_json (what was sent; automatic replies: `reply`), attempt, error (e.g. duty cycle refusal). Repeats heard: `SELECT * FROM rx_frames WHERE tx_id = ?`.
+Every transmission by this node, including automatic replies: raw, len, airtime_ms, route (`flood`, `scoped_flood` = transport flood with region code, `direct`, `zero_hop`), payload_type, pkt_hash, dest (peer key or channel name), data_json (what was sent; automatic replies: `reply`; room keep-alives: `room_keepalive`, `sync_since`, `expected_ack`), attempt, error (e.g. duty cycle refusal).
+ Repeats heard: `SELECT * FROM rx_frames WHERE tx_id = ?`.
 
 ## Views
 

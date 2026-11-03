@@ -52,6 +52,17 @@ pub struct NodeConfig {
     /// Answers to telemetry requests from other nodes (companion firmware behaviour).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Region for floods we originate (transport flood, e.g. "fi"); null = unscoped. Repeaters with
+    /// a low `flood.max.unscoped` only forward scoped floods far.
+    #[serde(default)]
+    pub flood_scope: Option<String>,
+    /// Keep-alive interval for joined room servers (seconds); 0 = off.
+    #[serde(default = "room_keepalive")]
+    pub room_keepalive_s: u64,
+}
+
+fn room_keepalive() -> u64 {
+    600
 }
 
 /// Telemetry permissions: "allow" or "deny". Base (battery; the stick has none, reported as 0.0 V like
@@ -119,6 +130,8 @@ impl Default for Config {
                 duty_cycle_enforce: true,
                 path_hash_size: 2,
                 telemetry: TelemetryConfig::default(),
+                flood_scope: None,
+                room_keepalive_s: room_keepalive(),
 
             },
             radio: RadioConfig {

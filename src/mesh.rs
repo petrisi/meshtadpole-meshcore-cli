@@ -1,7 +1,8 @@
 //! Packet builders for transmission (firmware Mesh.cpp / BaseChatMesh.cpp equivalents).
 
 use crate::crypto::{self, Identity, sha256};
-use crate::packet::{Packet, ROUTE_DIRECT, ROUTE_FLOOD, ptype};
+use crate::packet::{Packet, ROUTE_DIRECT, ROUTE_FLOOD, ROUTE_TRANSPORT_FLOOD, ptype};
+use hmac::{Hmac, Mac};
 use anyhow::{Result, bail};
 
 /// Max DM / channel text length (firmware MAX_TEXT_LEN = 10 cipher blocks).
@@ -11,7 +12,8 @@ pub const MAX_TEXT_LEN: usize = 160;
 #[derive(Debug, Clone)]
 pub enum Route {
     /// Flood with empty path; `hash_size` = path hash bytes repeaters append (1-3).
-    Flood { hash_size: u8 },
+    /// `scope`: region transport key (transport flood); None = unscoped.
+    Flood { hash_size: u8, scope: Option<[u8; 16]> },
     /// Direct along a path (raw path_len byte and path bytes). path_len 0 = zero hop.
     Direct { path_len: u8, path: Vec<u8> },
 }
@@ -22,7 +24,8 @@ impl Route {
     }
     pub fn name(&self) -> &'static str {
         match self {
-            Route::Flood { .. } => "flood",
+            Route::Flood { scope: None, .. } => "flood",
+            Route::Flood { .. } => "scoped_flood",
             Route::Direct { path_len, .. } if path_len & 63 == 0 => "zero_hop",
             Route::Direct { .. } => "direct",
         }
@@ -30,11 +33,40 @@ impl Route {
 }
 
 pub fn finish(t: u8, payload: Vec<u8>, route: &Route) -> Packet {
-    let (r, path_len, path) = match route {
-        Route::Flood { hash_size } => (ROUTE_FLOOD, (hash_size.clamp(&1, &3) - 1) << 6, vec![]),
-        Route::Direct { path_len, path } => (ROUTE_DIRECT, *path_len, path.clone()),
+    let (r, path_len, path, codes) = match route {
+        Route::Flood { hash_size, scope } => {
+            let pl = (hash_size.clamp(&1, &3) - 1) << 6;
+            match scope {
+                Some(k) => (ROUTE_TRANSPORT_FLOOD, pl, vec![], Some([transport_code(k, t, &payload), 0])),
+                None => (ROUTE_FLOOD, pl, vec![], None),
+            }
+        }
+        Route::Direct { path_len, path } => (ROUTE_DIRECT, *path_len, path.clone(), None),
     };
-    Packet { header: (t << 2) | r, transport_codes: None, path_len, path, payload }
+    Packet { header: (t << 2) | r, transport_codes: codes, path_len, path, payload }
+}
+
+/// Region transport key: sha256("#name")[0..16] (firmware TransportKeyStore::getAutoKeyFor; a region
+/// name without '#' is an implicit hashtag region). Private `$` regions are not supported.
+pub fn region_key(name: &str) -> Result<[u8; 16]> {
+    let n = name.trim().trim_start_matches('#');
+    if n.is_empty() || n.starts_with('$') || n == "*" {
+        bail!("region name must be a public region (e.g. fi), not empty, '*' or a private '$' region");
+    }
+    Ok(crypto::hashtag_key(&format!("#{n}")))
+}
+
+/// Transport code 1: HMAC-SHA256(key, payload type || payload)[0..2] LE; 0000 and FFFF reserved.
+pub fn transport_code(key: &[u8; 16], ptype: u8, payload: &[u8]) -> u16 {
+    let mut m = Hmac::<sha2::Sha256>::new_from_slice(key).expect("hmac key");
+    m.update(&[ptype]);
+    m.update(payload);
+    let h = m.finalize().into_bytes();
+    match u16::from_le_bytes([h[0], h[1]]) {
+        0 => 1,
+        0xFFFF => 0xFFFE,
+        c => c,
+    }
 }
 
 /// Advert app data: flags (type | 0x80 name | 0x10 location), [lat, lon i32 x1e6], name.
@@ -182,6 +214,57 @@ pub fn path_return(me: &Identity, peer: &[u8; 32], path_len: u8, path: &[u8], ex
     datagram(ptype::PATH, me, peer, &d, route)
 }
 
+/// Room server keep-alive REQ plaintext and the ACK code the room returns:
+/// timestamp, REQ_TYPE_KEEP_ALIVE, sync_since (latest post timestamp received); ACK =
+/// sha256(those 9 bytes, our key)[0..4] (firmware BaseChatMesh::checkConnections).
+pub fn keepalive_plain(me: &Identity, timestamp: u32, sync_since: u32) -> (Vec<u8>, u32) {
+    let mut p = timestamp.to_le_bytes().to_vec();
+    p.push(0x02);
+    p.extend(sync_since.to_le_bytes());
+    let h = sha256(&[&p, &me.public]);
+    (p, u32::from_le_bytes([h[0], h[1], h[2], h[3]]))
+}
+
+/// Anonymous request plaintext (repeater firmware 1.18 onAnonDataRecv): timestamp, request type,
+/// reply path (raw path_len byte + hashes, from the node back to us). Only accepted sent direct.
+pub fn anon_plain(timestamp: u32, req_type: u8, reply_path_len: u8, reply_path: &[u8]) -> Vec<u8> {
+    let mut p = timestamp.to_le_bytes().to_vec();
+    p.push(req_type);
+    p.push(reply_path_len);
+    p.extend(reply_path);
+    p
+}
+
+/// Reverse a direct path (raw path_len byte + hashes): our route to a node -> the node's route to us.
+pub fn reverse_path(path_len: u8, path: &[u8]) -> (u8, Vec<u8>) {
+    let hs = (path_len >> 6) as usize + 1;
+    let n = (path_len & 63) as usize;
+    let mut out = Vec::with_capacity(path.len());
+    for i in (0..n).rev() {
+        out.extend(&path[i * hs..(i + 1) * hs]);
+    }
+    (path_len, out)
+}
+
+/// Max channel datagram data (firmware MAX_GROUP_DATA_LENGTH = 184 - 16 - 3).
+pub const MAX_GROUP_DATA: usize = 165;
+
+/// Channel datagram (GRP_DATA): data type (u16 LE; 0 reserved, 0xFFFF developer namespace), length, data.
+pub fn group_data(secret: &[u8; 32], hash: u8, data_type: u16, data: &[u8], route: &Route) -> Result<Packet> {
+    if data_type == 0 {
+        bail!("data type 0 is reserved");
+    }
+    if data.len() > MAX_GROUP_DATA {
+        bail!("data longer than {MAX_GROUP_DATA} bytes");
+    }
+    let mut p = data_type.to_le_bytes().to_vec();
+    p.push(data.len() as u8);
+    p.extend(data);
+    let mut pl = vec![hash];
+    pl.extend(crypto::encrypt_then_mac(secret, &p));
+    Ok(finish(ptype::GRP_DATA, pl, route))
+}
+
 /// Channel text: timestamp, flags 0, "name: text".
 pub fn group_text(secret: &[u8; 32], hash: u8, timestamp: u32, sender: &str, text: &str, route: &Route) -> Result<Packet> {
     let mut body = format!("{sender}: ").into_bytes();
@@ -215,7 +298,7 @@ mod tests {
         let a = Identity::generate();
         let b = Identity::generate();
         let (plain, ack) = text_plain(&a, 100, 0, "hi").unwrap();
-        let p = datagram(ptype::TXT_MSG, &a, &b.public, &plain, &Route::Flood { hash_size: 2 }).unwrap();
+        let p = datagram(ptype::TXT_MSG, &a, &b.public, &plain, &Route::Flood { hash_size: 2, scope: None }).unwrap();
         let raw = p.encode();
         let mut keys = Keys { me: Some(b.clone()), ..Default::default() };
         keys.add_peer(a.public);
@@ -227,6 +310,29 @@ mod tests {
         let dec = crypto::mac_then_decrypt(&s, &raw[4..]).unwrap();
         assert_eq!(ack_for_plain(&dec, &a.public), ack);
         assert_eq!(raw[1], 0x40); // flood, 2-byte hashes, 0 hops
+    }
+
+    #[test]
+    fn scoped_flood_and_reverse_path() {
+        let k = region_key("fi").unwrap();
+        assert_eq!(k, region_key("#fi").unwrap());
+        let p = control(vec![1, 2, 3], &Route::Flood { hash_size: 2, scope: Some(k) });
+        let raw = p.encode();
+        assert_eq!(raw[0] & 3, ROUTE_TRANSPORT_FLOOD);
+        let q = Packet::parse(&raw).unwrap();
+        assert_eq!(q.transport_codes, Some([transport_code(&k, ptype::CONTROL, &[1, 2, 3]), 0]));
+        assert_eq!(reverse_path(0x42, &[1, 2, 3, 4]), (0x42, vec![3, 4, 1, 2]));
+    }
+
+    #[test]
+    fn group_data_roundtrip() {
+        let (secret, hash) = crypto::channel_secret(&crypto::hashtag_key("#test")).unwrap();
+        let p = group_data(&secret, hash, 0xFFFF, &[9, 8, 7], &Route::Flood { hash_size: 2, scope: None }).unwrap();
+        let mut keys = Keys::default();
+        keys.channels.push(crate::decode::Channel { name: "#test".into(), secret, hash });
+        let d = decode_frame(&p.encode(), false, &keys);
+        assert_eq!(d.status, Status::Ok);
+        assert_eq!(d.data.unwrap()["plain"]["data_hex"], "090807");
     }
 
     #[test]

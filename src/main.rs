@@ -64,6 +64,9 @@ enum Cmd {
     Advert {
         #[arg(long)]
         flood: bool,
+        /// Flood region (e.g. fi) or `none`; default: config node.flood_scope.
+        #[arg(long)]
+        scope: Option<String>,
         /// Seconds to collect echoes (repeaters relaying our advert) [default: 5 zero hop, 15 flood].
         #[arg(long)]
         wait: Option<f64>,
@@ -82,7 +85,37 @@ enum Cmd {
         /// Channel: seconds to collect echoes. DM: extra seconds added to the firmware ACK timeout.
         #[arg(long)]
         wait: Option<f64>,
+        /// Flood region (e.g. fi) or `none`; default: config node.flood_scope.
+        #[arg(long)]
+        scope: Option<String>,
     },
+    /// Channel datagram (GRP_DATA, no ACK): binary data for apps/bots on a configured channel.
+    /// DATA: hex. Type 0xFFFF is the developer namespace (default); 0 is reserved. Max 165 bytes.
+    #[command(name = "send-data")]
+    SendData {
+        channel: String,
+        data: String,
+        #[arg(long = "type", default_value_t = 0xFFFF)]
+        data_type: u16,
+        #[arg(long)]
+        scope: Option<String>,
+        /// Seconds to collect echoes.
+        #[arg(long)]
+        wait: Option<f64>,
+    },
+    /// Anonymous request to a repeater, no login: regions (region names allowing flood, `*` =
+    /// unscoped), owner (name and owner info), clock (node clock and feature flags). Repeater firmware
+    /// >= 1.18; sent direct only (learned path or zero hop), rate limited by the repeater.
+    Anon {
+        node: String,
+        kind: String,
+        #[arg(long, default_value_t = 1)]
+        retries: u32,
+    },
+    /// Joined room servers: membership kept by the daemon (keep-alive, re-login with catch-up).
+    Rooms,
+    /// Stop keeping a room membership (keep-alive and re-login). The room keeps us in its ACL.
+    Leave { node: String },
     /// Daemon status.
     Status,
     /// Stream received frames from the daemon as NDJSON.
@@ -387,6 +420,10 @@ fn run(cli: &Cli) -> Result<()> {
                 if !(1..=3).contains(&cfg.node.path_hash_size) {
                     bail!("node.path_hash_size must be 1..3");
                 }
+                if let Some(s) = cfg.node.flood_scope.as_deref().filter(|s| !s.is_empty() && *s != "none") {
+                    mesh::region_key(s)?;
+                }
+
             }
             if *write || !set.is_empty() {
                 cfg.save(&cfg_path)?;
@@ -425,14 +462,17 @@ fn run(cli: &Cli) -> Result<()> {
             }
         }
         Cmd::Daemon => daemon::run(&cfg, &db_path)?,
-        Cmd::Advert { flood, wait } => {
+        Cmd::Advert { flood, wait, scope } => {
             let mut req = json!({"cmd": "advert", "flood": flood});
+            if let Some(s) = scope {
+                req["scope"] = json!(s);
+            }
             if let Some(w) = wait {
                 req["wait_s"] = json!(w);
             }
             print(&daemon::call(&cfg.api, &req)?);
         }
-        Cmd::Send { to, text, flood, retries, wait } => {
+        Cmd::Send { to, text, flood, retries, wait, scope } => {
             let channel = if to.starts_with('#') {
                 Some(to.clone())
             } else {
@@ -458,7 +498,52 @@ fn run(cli: &Cli) -> Result<()> {
                     r
                 }
             };
+            let mut req = req;
+            if let Some(s) = scope {
+                req["scope"] = json!(s);
+            }
             print(&daemon::call(&cfg.api, &req)?);
+        }
+        Cmd::SendData { channel, data, data_type, scope, wait } => {
+            if !cfg.channels.iter().any(|c| &c.name == channel) {
+                bail!("channel {channel} not configured");
+            }
+            hex::decode(data).map_err(|e| anyhow!("DATA must be hex: {e}"))?;
+            let mut req = json!({"cmd": "send_channel_data", "channel": channel, "data_hex": data, "data_type": data_type});
+            if let Some(s) = scope {
+                req["scope"] = json!(s);
+            }
+            if let Some(w) = wait {
+                req["wait_s"] = json!(w);
+            }
+            print(&daemon::call(&cfg.api, &req)?);
+        }
+        Cmd::Anon { node, kind, retries } => {
+            repeater::anon_kind(kind).ok_or_else(|| anyhow!("unknown kind {kind} (regions, owner, clock)"))?;
+            let targets = resolve_targets(&cfg, &db_path, node)?;
+            print(&for_targets(&targets, |(key, _, _)| daemon::call(&cfg.api, &json!({"cmd": "anon_request", "to": key, "kind": kind, "retries": retries}))));
+        }
+        Cmd::Rooms => {
+            let c = store::open_ro(&db_path)?;
+            let mut rows = store::query_json(
+                &c,
+                "SELECT r.public_key, n.name, r.active, r.joined, r.sync_since, r.last_login, r.last_keepalive_ok, r.last_post
+                 FROM rooms r LEFT JOIN nodes n ON n.public_key = r.public_key ORDER BY r.active DESC, r.last_login DESC",
+                &[],
+            )?;
+            // Live keeper state when the daemon runs.
+            if let Ok(s) = daemon::call(&cfg.api, &json!({"cmd": "status"})) {
+                for r in rows.iter_mut() {
+                    if let Some(live) = s["rooms"].as_array().and_then(|a| a.iter().find(|x| x["public_key"] == r["public_key"])) {
+                        r["keeper"] = live.clone();
+                    }
+                }
+            }
+            print(&json!(rows));
+        }
+        Cmd::Leave { node } => {
+            let key = resolve_node(&db_path, node)?;
+            print(&daemon::call(&cfg.api, &json!({"cmd": "leave_room", "to": key}))?);
         }
         Cmd::Status => print(&daemon::call(&cfg.api, &json!({"cmd": "status"}))?),
         Cmd::Listen { ok_only, seconds } => {

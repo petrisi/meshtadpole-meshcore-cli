@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub use meshtadpole_radio::store::{COMMON_SCHEMA, now};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS rx_frames(
@@ -83,6 +83,16 @@ CREATE TABLE IF NOT EXISTS tx_frames(
   attempt INTEGER, error TEXT
 );
 CREATE INDEX IF NOT EXISTS tx_frames_time ON tx_frames(tx_time);
+
+CREATE TABLE IF NOT EXISTS rooms(
+  public_key TEXT PRIMARY KEY,
+  active INTEGER NOT NULL DEFAULT 1,
+  joined REAL,
+  sync_since INTEGER,
+  last_login REAL,
+  last_keepalive_ok REAL,
+  last_post REAL
+);
 
 CREATE VIEW IF NOT EXISTS v_packets AS
 SELECT f.id, f.rx_time, datetime(f.rx_time,'unixepoch') AS rx_utc, f.status, f.route, f.payload_type,
@@ -308,6 +318,43 @@ pub fn load_out_paths(c: &Connection) -> Result<Vec<KeyPath>> {
         .flatten()
         .filter_map(|(k, l, p)| Some((<[u8; 32]>::try_from(hex::decode(k).ok()?.as_slice()).ok()?, l, hex::decode(p).ok()?)))
         .collect())
+}
+
+/// Room joined (successful room login): active, sync_since = posts newer than this are pushed.
+pub fn room_join(c: &Connection, key: &str, sync_since: u32) -> Result<()> {
+    let t = now();
+    c.execute(
+        "INSERT INTO rooms(public_key,active,joined,sync_since,last_login) VALUES(?1,1,?2,?3,?2)
+         ON CONFLICT(public_key) DO UPDATE SET active=1, last_login=?2, sync_since=max(coalesce(sync_since,0),?3)",
+        params![key, t, sync_since],
+    )?;
+    Ok(())
+}
+
+/// Stop maintaining a room membership (the room keeps us in its ACL).
+pub fn room_leave(c: &Connection, key: &str) -> Result<bool> {
+    Ok(c.execute("UPDATE rooms SET active=0 WHERE public_key=?1", params![key])? > 0)
+}
+
+/// Post received from a room: advance sync_since (room clock post timestamp).
+pub fn room_post(c: &Connection, key: &str, post_ts: u32) -> Result<()> {
+    c.execute(
+        "UPDATE rooms SET sync_since=max(coalesce(sync_since,0),?2), last_post=?3 WHERE public_key=?1",
+        params![key, post_ts, now()],
+    )?;
+    Ok(())
+}
+
+pub fn room_keepalive_ok(c: &Connection, key: &str) -> Result<()> {
+    c.execute("UPDATE rooms SET last_keepalive_ok=?2 WHERE public_key=?1", params![key, now()])?;
+    Ok(())
+}
+
+/// Active rooms: (public key, sync_since).
+pub fn load_rooms(c: &Connection) -> Result<Vec<([u8; 32], u32)>> {
+    let mut st = c.prepare("SELECT public_key, coalesce(sync_since,0) FROM rooms WHERE active=1")?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+    Ok(rows.flatten().filter_map(|(k, s)| Some((<[u8; 32]>::try_from(hex::decode(k).ok()?.as_slice()).ok()?, s))).collect())
 }
 
 /// Known peer public keys (for decrypting messages to us).

@@ -9,6 +9,55 @@ pub const REQ_ACL: u8 = 0x05;
 pub const REQ_NEIGHBOURS: u8 = 0x06;
 pub const REQ_OWNER: u8 = 0x07;
 
+/// Anonymous requests (ANON_REQ, no login; repeater firmware 1.18, direct route only).
+pub const ANON_REGIONS: u8 = 0x01;
+pub const ANON_OWNER: u8 = 0x02;
+pub const ANON_CLOCK: u8 = 0x03;
+
+pub fn anon_kind(name: &str) -> Option<u8> {
+    Some(match name {
+        "regions" => ANON_REGIONS,
+        "owner" => ANON_OWNER,
+        "clock" => ANON_CLOCK,
+        _ => return None,
+    })
+}
+
+/// Anonymous request reply: tag (our timestamp), node clock, then per type: region names allowing
+/// flood (comma list; `*` = unscoped allowed), name and owner info (newline separated), or feature flags.
+pub fn parse_anon(req_type: u8, b: &[u8]) -> Result<Value, String> {
+    if b.len() < 8 {
+        return Err("anonymous reply too short".into());
+    }
+    let mut v = json!({"server_time": u32le(b, 4)});
+    let rest = &b[8..];
+    let text = || String::from_utf8_lossy(&rest[..rest.iter().position(|&x| x == 0).unwrap_or(rest.len())]).into_owned();
+    match req_type {
+        ANON_REGIONS => {
+            let t = text();
+            v["regions"] = json!(t.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>());
+        }
+        ANON_OWNER => {
+            let t = text();
+            let (name, owner) = t.split_once('\n').unwrap_or((t.as_str(), ""));
+            v["name"] = json!(name);
+            v["owner_info"] = json!(owner);
+        }
+        _ => {
+            let f = rest.first().copied().unwrap_or(0);
+            v["features"] = json!(f);
+            v["bridge"] = json!(match f & 0x03 {
+                0 => None,
+                1 => Some("uart"),
+                3 => Some("espnow"),
+                _ => Some("unknown"),
+            });
+            v["repeat_disabled"] = json!(f & 0x80 != 0);
+        }
+    }
+    Ok(v)
+}
+
 pub const CTL_DISCOVER_REQ: u8 = 0x80;
 /// Neighbour entries per response page with 6-byte key prefixes (130-byte firmware result buffer / 11).
 pub const NEIGHBOURS_PAGE: u8 = 11;

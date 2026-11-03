@@ -13,6 +13,11 @@
 //! - `{"cmd":"cli","to":"<key>","command":"..","password":".."}` -> command reply text.
 //! - `{"cmd":"trace","path":"aabb,ccdd,aabb","wait_s":f}` -> per-hop SNR along the path.
 //! - `{"cmd":"path_reset","to":"<key>"}` -> forget the learned route to a node (next send floods).
+//! - `{"cmd":"anon_request","to":"<key>","kind":"regions|owner|clock"}` -> repeater answer without login.
+//! - `{"cmd":"send_channel_data","channel":"<name>","data_type":n,"data_hex":".."}` -> channel datagram.
+//! - `{"cmd":"leave_room","to":"<key>"}` -> stop room keep-alive / re-login.
+//!
+//! Floods use the configured region scope; `"scope":"<region>|none"` overrides it per request.
 
 use crate::config::Config;
 use crate::decode::{Decoded, Keys, Status, decode_frame, to_json};
@@ -99,6 +104,31 @@ struct Shared {
     status: Mutex<Value>,
     frames: AtomicU64,
     stop: AtomicBool,
+    /// Region transport key for our floods (config node.flood_scope).
+    scope: Option<[u8; 16]>,
+    /// Joined room servers (maintained by the room keeper thread).
+    rooms: Mutex<HashMap<[u8; 32], RoomState>>,
+}
+
+/// Room membership kept alive by the daemon: keep-alive REQ every interval (direct route only, as
+/// firmware); after 2 missed keep-alive ACKs, or without a direct route, log in again with
+/// sync_since = latest post received, so missed posts are pushed.
+struct RoomState {
+    /// Password from the API login (memory only) or config `passwords`.
+    password: Option<String>,
+    /// Latest post timestamp received (room clock); posts newer than this are pushed.
+    sync_since: u32,
+    next_ping: Instant,
+    misses: u32,
+    relogin: bool,
+    last_ok: Option<f64>,
+    last_error: Option<String>,
+}
+
+impl RoomState {
+    fn new(password: Option<String>, sync_since: u32, next_ping: Instant) -> RoomState {
+        RoomState { password, sync_since, next_ping, misses: 0, relogin: false, last_ok: None, last_error: None }
+    }
 }
 
 impl Shared {
@@ -115,7 +145,35 @@ impl Shared {
     }
 
     fn flood(&self) -> Route {
-        Route::Flood { hash_size: self.cfg.node.path_hash_size }
+        Route::Flood { hash_size: self.cfg.node.path_hash_size, scope: self.scope }
+    }
+
+    /// Flood route with the request's `scope` override ("none" or "" = unscoped).
+    fn flood_req(&self, req: &Value) -> Result<Route> {
+        let scope = match req["scope"].as_str() {
+            None => self.scope,
+            Some("") | Some("none") => None,
+            Some(r) => Some(mesh::region_key(r)?),
+        };
+        Ok(Route::Flood { hash_size: self.cfg.node.path_hash_size, scope })
+    }
+
+    /// Forget the learned route to a peer (memory and DB); the next send floods and learns again.
+    fn forget_path(&self, peer: &[u8; 32]) -> Option<OutPath> {
+        let old = self.out_paths.lock().unwrap().remove(peer);
+        if old.is_some() {
+            if let Ok(c) = store::open_rw(&self.db) {
+                let _ = c.execute(
+                    "UPDATE nodes SET out_path=NULL, out_path_len=NULL, out_path_time=NULL WHERE public_key=?1",
+                    meshtadpole_radio::store::rusqlite::params![hex::encode(peer)],
+                );
+            }
+        }
+        old
+    }
+
+    fn room_interval(&self) -> Duration {
+        Duration::from_secs(self.cfg.node.room_keepalive_s.max(60))
     }
 
     fn wait_for(&self, m: Match) -> (u64, std::sync::mpsc::Receiver<Value>) {
@@ -206,7 +264,7 @@ fn echo_json(ev: &Value) -> Value {
 fn advert(sh: &Shared, req: &Value) -> Result<Value> {
     let me = sh.me()?;
     let flood = req["flood"].as_bool().unwrap_or(false);
-    let route = if flood { sh.flood() } else { Route::zero_hop() };
+    let route = if flood { sh.flood_req(req)? } else { Route::zero_hop() };
     let n = &sh.cfg.node;
     let loc = n.latitude.zip(n.longitude);
     let app = mesh::app_data(crate::config::adv_type_code(&n.adv_type)?, &n.name, loc);
@@ -232,7 +290,7 @@ fn send_channel(sh: &Shared, req: &Value) -> Result<Value> {
     let name = req["channel"].as_str().ok_or_else(|| anyhow!("channel required"))?;
     let text = req["text"].as_str().ok_or_else(|| anyhow!("text required"))?;
     let ch = sh.keys.read().unwrap().channels.iter().find(|c| c.name == name).cloned().ok_or_else(|| anyhow!("unknown channel {name}"))?;
-    let route = sh.flood();
+    let route = sh.flood_req(req)?;
     let ts = sh.timestamp();
     let p = mesh::group_text(&ch.secret, ch.hash, ts, &sh.cfg.node.name, text, &route)?;
     let h = hex::encode(p.hash());
@@ -251,7 +309,33 @@ fn send_channel(sh: &Shared, req: &Value) -> Result<Value> {
     Ok(json!({"pkt_hash": h, "channel": name, "timestamp": ts, "transmission": report_json(&r, 0, &route), "echoes": heard}))
 }
 
+/// Channel datagram (GRP_DATA): unacknowledged, flood.
+fn send_channel_data(sh: &Shared, req: &Value) -> Result<Value> {
+    let name = req["channel"].as_str().ok_or_else(|| anyhow!("channel required"))?;
+    let data = hex::decode(req["data_hex"].as_str().unwrap_or_default()).map_err(|e| anyhow!("data_hex: {e}"))?;
+    let dt = u16::try_from(req["data_type"].as_u64().unwrap_or(0xFFFF)).map_err(|_| anyhow!("data_type must be 1..65535"))?;
+    let ch = sh.keys.read().unwrap().channels.iter().find(|c| c.name == name).cloned().ok_or_else(|| anyhow!("unknown channel {name}"))?;
+    let route = sh.flood_req(req)?;
+    let p = mesh::group_data(&ch.secret, ch.hash, dt, &data, &route)?;
+    let h = hex::encode(p.hash());
+    let (wid, rx) = sh.wait_for(Match::Echo(h.clone()));
+    let md = json!({"channel": name, "data_type": dt, "data_hex": hex::encode(&data)});
+    let r = sh.transmit(&p, meta(&p, &route, Some(name.to_string()), md, 0), Duration::from_millis(rand::random::<u64>() % 400));
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            sh.unwait(&[wid]);
+            return Err(e);
+        }
+    };
+    let heard = echoes(&rx, req["wait_s"].as_f64().unwrap_or(10.0));
+    sh.unwait(&[wid]);
+    Ok(json!({"pkt_hash": h, "channel": name, "data_type": dt, "len": data.len(), "transmission": report_json(&r, 0, &route), "echoes": heard}))
+}
+
 /// DM with ACK wait and retries. Direct when a path is known (last attempt floods), else flood.
+/// When the direct attempts get no ACK, the learned path is forgotten before the flood (firmware
+/// companion behaviour); the flood's PATH return teaches a new one.
 fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
     let me = sh.me()?;
     let to = req["to"].as_str().ok_or_else(|| anyhow!("to required (64 hex public key)"))?;
@@ -260,6 +344,8 @@ fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
     let retries = req["retries"].as_u64().unwrap_or(2) as u32;
     let force_flood = req["flood"].as_bool().unwrap_or(false);
     let extra_wait = req["extra_wait_s"].as_f64().unwrap_or(3.0);
+    let flood = sh.flood_req(req)?;
+    let mut path_reset = false;
     let ts = sh.timestamp();
     let mut txs = Vec::new();
     let mut echoes_heard = Vec::new();
@@ -270,7 +356,12 @@ fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
         let path = sh.out_paths.lock().unwrap().get(&peer).cloned();
         let route = match path {
             Some((path_len, path)) if !force_flood && attempt < retries => Route::Direct { path_len, path },
-            _ => sh.flood(),
+            Some(_) if !force_flood && attempt > 0 => {
+                sh.forget_path(&peer);
+                path_reset = true;
+                flood.clone()
+            }
+            _ => flood.clone(),
         };
         let (plain, ack) = mesh::text_plain(&me, ts, attempt as u8, text)?;
         let p = mesh::datagram(ptype::TXT_MSG, &me, &peer, &plain, &route)?;
@@ -312,6 +403,9 @@ fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
     out["timestamp"] = json!(ts);
     out["transmissions"] = json!(txs);
     out["echoes"] = json!(echoes_heard);
+    if path_reset {
+        out["path_reset"] = json!(true);
+    }
     out["out_path"] = json!(sh.out_paths.lock().unwrap().get(&peer).map(|(l, p)| json!({"path_len": l, "path": hex::encode(p)})));
     Ok(out)
 }
@@ -366,9 +460,10 @@ fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, room_since: Op
     let me = sh.me()?;
     let mut txs = Vec::new();
     for attempt in 0..=retries {
-        let route = if attempt == retries && attempt > 0 { sh.flood() } else { sh.route_to(&peer) };
+        let route = if attempt == retries && attempt > 0 { flood_fallback(sh, &peer) } else { sh.route_to(&peer) };
         let ts = sh.timestamp();
-        let plain = repeater::login_plain(ts, password, room.then_some(room_since.unwrap_or(ts)));
+        let since = room_since.unwrap_or(ts);
+        let plain = repeater::login_plain(ts, password, room.then_some(since));
         let p = mesh::anon_req(&me, &peer, &plain, &route)?;
         let (wid, rx) = sh.wait_for(Match::Response { peer, tag: None });
         let m = meta(&p, &route, Some(hex::encode(peer)), json!({"login": true, "attempt": attempt}), attempt);
@@ -384,6 +479,9 @@ fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, room_since: Op
             v["transmissions"] = json!(txs);
             if v["ok"] == true {
                 sh.logins.lock().unwrap().insert(peer, v.clone());
+                if room {
+                    join_room(sh, peer, password, since);
+                }
             }
             if let Ok(c) = store::open_rw(&sh.db) {
                 let _ = store::insert_report(&c, &hex::encode(peer), "login", &v);
@@ -392,6 +490,29 @@ fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, room_since: Op
         }
     }
     Ok(json!({"ok": false, "error": "no response (wrong password gets no reply)", "transmissions": txs}))
+}
+
+/// Last attempt after direct ones failed: forget the learned path and flood.
+fn flood_fallback(sh: &Shared, peer: &[u8; 32]) -> Route {
+    sh.forget_path(peer);
+    sh.flood()
+}
+
+/// Remember a joined room (DB + keeper state).
+fn join_room(sh: &Shared, peer: [u8; 32], password: &str, since: u32) {
+    if let Ok(c) = store::open_rw(&sh.db) {
+        let _ = store::room_join(&c, &hex::encode(peer), since);
+    }
+    let iv = sh.room_interval();
+    let mut rooms = sh.rooms.lock().unwrap();
+    let r = rooms.entry(peer).or_insert_with(|| RoomState::new(None, 0, Instant::now()));
+    r.password = Some(password.to_string());
+    r.sync_since = r.sync_since.max(since);
+    r.next_ping = Instant::now() + iv;
+    r.misses = 0;
+    r.relogin = false;
+    r.last_ok = Some(store::now());
+    r.last_error = None;
 }
 
 /// Log in first when not logged in this daemon session and a password is given.
@@ -415,7 +536,7 @@ fn req_once(sh: &Shared, peer: [u8; 32], req_type: u8, offset: u16, retries: u32
     let me = sh.me()?;
     let mut txs = Vec::new();
     for attempt in 0..=retries {
-        let route = if attempt == retries && attempt > 0 { sh.flood() } else { sh.route_to(&peer) };
+        let route = if attempt == retries && attempt > 0 { flood_fallback(sh, &peer) } else { sh.route_to(&peer) };
         let ts = sh.timestamp();
         let p = mesh::datagram(ptype::REQ, &me, &peer, &repeater::request_plain(ts, req_type, offset), &route)?;
         let (wid, rx) = sh.wait_for(Match::Response { peer, tag: Some(ts) });
@@ -536,6 +657,11 @@ fn cli(sh: &Shared, req: &Value) -> Result<Value> {
     }
     out["ok"] = json!(false);
     out["error"] = json!("no reply (not logged in as admin, unknown command, or out of range)");
+    // Not retried by flood here (the command may have executed); the next call floods and relearns.
+    if matches!(sh.route_to(&peer), Route::Direct { .. }) {
+        sh.forget_path(&peer);
+        out["path_reset"] = json!(true);
+    }
     out["transmissions"] = json!(txs);
     Ok(out)
 }
@@ -615,13 +741,165 @@ fn trace(sh: &Shared, req: &Value) -> Result<Value> {
 
 fn path_reset(sh: &Shared, req: &Value) -> Result<Value> {
     let peer = peer_key(req)?;
-    let old = sh.out_paths.lock().unwrap().remove(&peer);
-    let c = store::open_rw(&sh.db)?;
-    c.execute(
-        "UPDATE nodes SET out_path=NULL, out_path_len=NULL, out_path_time=NULL WHERE public_key=?1",
-        meshtadpole_radio::store::rusqlite::params![hex::encode(peer)],
-    )?;
+    let old = sh.forget_path(&peer);
     Ok(json!({"to": hex::encode(peer), "reset": true, "previous": old.map(|(l, p)| json!({"path_len": l, "path": hex::encode(p)}))}))
+}
+
+/// Anonymous request to a repeater (no login): regions, owner, clock. Firmware accepts it only sent
+/// direct, so it goes along the learned path or zero hop, and carries the reversed path for the reply.
+fn anon_request(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let kind = req["kind"].as_str().ok_or_else(|| anyhow!("kind required"))?;
+    let rt = repeater::anon_kind(kind).ok_or_else(|| anyhow!("unknown kind {kind} (regions, owner, clock)"))?;
+    let me = sh.me()?;
+    let retries = req["retries"].as_u64().unwrap_or(1) as u32;
+    let (route, (rpl, rp)) = match sh.route_to(&peer) {
+        Route::Direct { path_len, path } => {
+            let back = mesh::reverse_path(path_len, &path);
+            (Route::Direct { path_len, path }, back)
+        }
+        _ => (Route::zero_hop(), (0, vec![])),
+    };
+    let mut txs = Vec::new();
+    let mut out = json!({"to": hex::encode(peer), "kind": kind, "route": route.name()});
+    for attempt in 0..=retries {
+        let ts = sh.timestamp();
+        let p = mesh::anon_req(&me, &peer, &mesh::anon_plain(ts, rt, rpl, &rp), &route)?;
+        let (wid, rx) = sh.wait_for(Match::Response { peer, tag: Some(ts) });
+        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"anon_request": kind, "tag": ts}), attempt);
+        let res = exchange(sh, &p, &route, m, &rx, 4.0);
+        sh.unwait(&[wid]);
+        let (tx, ev, ms) = res?;
+        txs.push(tx);
+        if let Some(ev) = ev {
+            let b = hex::decode(ev["response_hex"].as_str().unwrap_or_default())?;
+            let d = repeater::parse_anon(rt, &b).map_err(|e| anyhow!(e))?;
+            if let Ok(c) = store::open_rw(&sh.db) {
+                let _ = store::insert_report(&c, &hex::encode(peer), &format!("anon_{kind}"), &d);
+            }
+            out["ok"] = json!(true);
+            out["data"] = d;
+            out["rtt_ms"] = json!(ms);
+            out["rf"] = rf(&ev);
+            out["transmissions"] = json!(txs);
+            return Ok(out);
+        }
+    }
+    out["ok"] = json!(false);
+    out["error"] = json!("no reply (repeaters with firmware >= 1.18 only; must be a direct neighbour or have a learned path; rate limited)");
+    out["transmissions"] = json!(txs);
+    Ok(out)
+}
+
+fn leave_room(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let was = sh.rooms.lock().unwrap().remove(&peer).is_some();
+    let c = store::open_rw(&sh.db)?;
+    let stored = store::room_leave(&c, &hex::encode(peer))?;
+    Ok(json!({"to": hex::encode(peer), "left": was || stored}))
+}
+
+fn rooms_status(sh: &Shared) -> Value {
+    let now = Instant::now();
+    let rooms = sh.rooms.lock().unwrap();
+    json!(rooms
+        .iter()
+        .map(|(k, r)| json!({
+            "public_key": hex::encode(k), "sync_since": r.sync_since, "misses": r.misses, "relogin_pending": r.relogin,
+            "has_password": r.password.is_some(), "last_ok": r.last_ok, "last_error": r.last_error,
+            "next_keepalive_in_s": r.next_ping.saturating_duration_since(now).as_secs(),
+        }))
+        .collect::<Vec<_>>())
+}
+
+/// Room keeper thread: keep-alives and re-logins for joined rooms (one room at a time).
+fn room_keeper(sh: Arc<Shared>) {
+    if sh.cfg.node.room_keepalive_s == 0 {
+        return;
+    }
+    while !sh.stop.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_secs(2));
+        if sh.status.lock().unwrap()["radio"] != "connected" {
+            continue;
+        }
+        let now = Instant::now();
+        let due: Vec<[u8; 32]> = sh.rooms.lock().unwrap().iter().filter(|(_, r)| now >= r.next_ping).map(|(k, _)| *k).collect();
+        for peer in due {
+            if let Err(e) = keep_room(&sh, peer) {
+                if let Some(r) = sh.rooms.lock().unwrap().get_mut(&peer) {
+                    r.last_error = Some(format!("{e:#}"));
+                    r.next_ping = Instant::now() + Duration::from_secs(300);
+                }
+            }
+        }
+    }
+}
+
+fn keep_room(sh: &Shared, peer: [u8; 32]) -> Result<()> {
+    let (password, sync_since, mut relogin) = {
+        let rooms = sh.rooms.lock().unwrap();
+        let Some(r) = rooms.get(&peer) else { return Ok(()) };
+        (r.password.clone(), r.sync_since, r.relogin)
+    };
+    let set = |f: &dyn Fn(&mut RoomState)| {
+        if let Some(r) = sh.rooms.lock().unwrap().get_mut(&peer) {
+            f(r);
+        }
+    };
+    // Firmware sends keep-alives direct only; without a route, log in again (floods, learns a path).
+    if !matches!(sh.route_to(&peer), Route::Direct { .. }) {
+        relogin = true;
+    }
+    if relogin {
+        let Some(pw) = password else {
+            set(&|r| {
+                r.relogin = true;
+                r.last_error = Some("re-login needed but no password (config passwords)".into());
+                r.next_ping = Instant::now() + Duration::from_secs(3600);
+            });
+            return Ok(());
+        };
+        let v = login(sh, peer, &pw, true, Some(sync_since), 1)?;
+        if v["ok"] != true {
+            // Back off: a room out of range or rebooting is retried later.
+            set(&|r| {
+                r.relogin = true;
+                r.last_error = Some("re-login: no response".into());
+                r.next_ping = Instant::now() + Duration::from_secs(600);
+            });
+        }
+        return Ok(());
+    }
+    let me = sh.me()?;
+    let route = sh.route_to(&peer);
+    let ts = sh.timestamp();
+    let (plain, ack) = mesh::keepalive_plain(&me, ts, sync_since);
+    let p = mesh::datagram(ptype::REQ, &me, &peer, &plain, &route)?;
+    let (wid, rx) = sh.wait_for(Match::Ack(ack));
+    let md = json!({"room_keepalive": true, "sync_since": sync_since, "expected_ack": format!("{ack:08x}")});
+    let res = exchange(sh, &p, &route, meta(&p, &route, Some(hex::encode(peer)), md, 0), &rx, 4.0);
+    sh.unwait(&[wid]);
+    let (_, ev, _) = res?;
+    let iv = sh.room_interval();
+    if ev.is_some() {
+        if let Ok(c) = store::open_rw(&sh.db) {
+            let _ = store::room_keepalive_ok(&c, &hex::encode(peer));
+        }
+        set(&|r| {
+            r.misses = 0;
+            r.last_ok = Some(store::now());
+            r.last_error = None;
+            r.next_ping = Instant::now() + iv;
+        });
+    } else {
+        set(&|r| {
+            r.misses += 1;
+            r.last_error = Some(format!("keep-alive unanswered ({} in a row)", r.misses));
+            r.relogin = r.misses >= 2;
+            r.next_ping = Instant::now() + Duration::from_secs(60);
+        });
+    }
+    Ok(())
 }
 
 fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
@@ -640,6 +918,8 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
             s["loop_age_s"] = json!(sh.liveness.age_s().map(|a| (a * 10.0).round() / 10.0));
             s["duty_cycle_limit"] = json!(sh.cfg.node.duty_cycle_limit);
             s["duty_cycle_enforce"] = json!(sh.cfg.node.duty_cycle_enforce);
+            s["flood_scope"] = json!(sh.cfg.node.flood_scope);
+            s["rooms"] = rooms_status(sh);
             return writeln!(w, "{s}");
         }
         "subscribe" => {
@@ -660,6 +940,9 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "cli" => cli(sh, &req),
         "trace" => trace(sh, &req),
         "path_reset" => path_reset(sh, &req),
+        "anon_request" => anon_request(sh, &req),
+        "send_channel_data" => send_channel_data(sh, &req),
+        "leave_room" => leave_room(sh, &req),
         other => Err(anyhow!("unknown cmd {other:?}")),
     };
     let out = res.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
@@ -829,6 +1112,10 @@ impl link::Handler for Mc {
             link::Event::Connected { usb_serial } => {
                 st["radio"] = json!("connected");
                 st["usb_serial"] = json!(usb_serial);
+                // Pushes may have failed while disconnected: keep-alive soon (resets the room's push failures).
+                for r in self.sh.rooms.lock().unwrap().values_mut() {
+                    r.next_ping = Instant::now();
+                }
             }
             link::Event::Disconnected { .. } => st["radio"] = json!("disconnected"),
             _ => {}
@@ -893,6 +1180,20 @@ impl link::Handler for Mc {
                 }
             }
         }
+        // Joined rooms: any traffic from the room is activity (firmware markConnectionActive); a
+        // pushed post (signed text) advances sync_since.
+        if let (Some(p), Some((peer, "in", b)), None, Status::Ok) = (&d.packet, &d.peer_plain, dup_of, &d.status) {
+            let iv = sh.room_interval();
+            let mut rooms = sh.rooms.lock().unwrap();
+            if let Some(r) = rooms.get_mut(peer) {
+                r.next_ping = r.next_ping.max(Instant::now() + iv);
+                if p.ptype() == ptype::TXT_MSG && b.len() >= 9 && b[4] >> 2 == 2 {
+                    let ts = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    r.sync_since = r.sync_since.max(ts);
+                    store::room_post(&self.w.s.c, &hex::encode(peer), ts)?;
+                }
+            }
+        }
         sh.notify(&ack_codes(&d), d.pkt_hash.as_deref(), &sigs, &ev);
         if d.status != Status::Ok {
             return Ok(vec![]);
@@ -939,6 +1240,14 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
     for k in store::load_peer_keys(&c)? {
         keys.add_peer(k);
     }
+    let scope = cfg.node.flood_scope.as_deref().filter(|s| !s.is_empty() && *s != "none").map(mesh::region_key).transpose()?;
+    // Joined rooms: password from config (by node name or key prefix); keep-alive soon after start.
+    let mut rooms = HashMap::new();
+    for (k, since) in store::load_rooms(&c)? {
+        let kh = hex::encode(k);
+        let name: Option<String> = c.query_row("SELECT name FROM nodes WHERE public_key=?1", [&kh], |r| r.get(0)).ok().flatten();
+        rooms.insert(k, RoomState::new(cfg.password_for(name.as_deref(), &kh), since, Instant::now() + Duration::from_secs(10)));
+    }
     let out_paths: HashMap<[u8; 32], OutPath> = store::load_out_paths(&c)?.into_iter().map(|(k, l, p)| (k, (l, p))).collect();
     let w = Writer { me: me.as_ref().map(|m| m.public_hex()), s: Session::start(c, env!("CARGO_PKG_VERSION"), "", &lora, &serde_json::to_string(&cfg.redacted())?)? };
     let (qtx, qrx) = channel::<Job>();
@@ -960,6 +1269,8 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         status: Mutex::new(Value::Null),
         frames: AtomicU64::new(0),
         stop: AtomicBool::new(false),
+        scope,
+        rooms: Mutex::new(rooms),
     });
     *sh.status.lock().unwrap() = json!({
         "pid": std::process::id(),
@@ -981,7 +1292,12 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
     }
     {
         let sh = sh.clone();
-        ctrlc::set_handler(move || sh.stop.store(true, Ordering::SeqCst)).ok();
+        std::thread::spawn(move || room_keeper(sh));
+    }
+    {
+        let sh = sh.clone();
+        ctrlc::set_handler
+(move || sh.stop.store(true, Ordering::SeqCst)).ok();
     }
     eprintln!("{}", json!({"event": "started", "status": *sh.status.lock().unwrap()}));
     let lc = link::LinkConfig {

@@ -123,14 +123,15 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 | Node table from adverts and DISCOVER, flood paths, last hop, duplicate linking | working |
 | Adverts (zero hop / flood), channel messages, echo tracking | working (on air) |
 | DMs with ACK, retries, path learning, automatic ACK / PATH replies | working (on air, direct neighbour; multi-hop flood DM to us not yet tested) |
-| Telemetry answers to requests addressed to us | implemented, not yet tested on air |
+| Telemetry answers to requests addressed to us | working (on air: companion shows 0.0 V) |
 | Repeater management: login, status, telemetry, neighbours, ACL, owner, remote CLI, bulk targets | working (on air, firmware 1.17.1 and 1.18.0) |
-| Learned route show / reset (`path`) | working |
+| Learned route show / reset (`path`); automatic reset and flood after failed direct attempts | working |
 | TRACE (round trip, asymmetric), topology graph, DISCOVER | working (on air) |
 | Daemon: start without stick, reconnect, loop watchdog, stuck-receiver recovery | working (shared meshtadpole-radio) |
 | Linux (Ubuntu 26.04.1, kernel 7.0) | working: build, tests, RX, TX (discover, trace), reconnect on attach |
-| Room servers (login implemented; post sync, keep-alive) | not tested / not implemented |
-| Region-scoped floods (transport codes) TX, anonymous requests, GRP_DATA TX | not implemented (RX decoded) |
+| Room servers: login, posting, pushed posts ACKed, catch-up (`--since`), keep-alive and re-login (`rooms`, `leave`) | working (on air, stock firmware 1.18.0) |
+| Region-scoped floods (`node.flood_scope`, `--scope`), anonymous requests (`anon`), channel datagrams (`send-data`) | working (on air) |
+
 | Guarded setting writes (`set`: dry run, read-back), disruptive-command guard on `cmd`, secret redaction | working (on air) |
 
 Development phases:
