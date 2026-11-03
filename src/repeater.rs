@@ -257,10 +257,14 @@ pub fn parse_lpp(b: &[u8]) -> Value {
             133 => ("unixtime", 4, Box::new(|d| json!(u32::from_be_bytes([d[0], d[1], d[2], d[3]])))),
             134 => ("gyrometer_dps", 6, Box::new(|d| json!([0, 2, 4].map(|k| i16::from_be_bytes([d[k], d[k + 1]]) as f64 / 100.0)))),
             135 => ("colour_rgb", 3, Box::new(|d| json!([d[0], d[1], d[2]]))),
-            136 => ("gps", 9, Box::new(|d| {
-                let s24 = |k: usize| (((d[k] as i32) << 24 | (d[k + 1] as i32) << 16 | (d[k + 2] as i32) << 8) >> 8) as f64;
-                json!({"latitude": s24(0) / 1e4, "longitude": s24(3) / 1e4, "altitude_m": s24(6) / 100.0})
-            })),
+            136 => (
+                "gps",
+                9,
+                Box::new(|d| {
+                    let s24 = |k: usize| (((d[k] as i32) << 24 | (d[k + 1] as i32) << 16 | (d[k + 2] as i32) << 8) >> 8) as f64;
+                    json!({"latitude": s24(0) / 1e4, "longitude": s24(3) / 1e4, "altitude_m": s24(6) / 100.0})
+                }),
+            ),
             142 => ("switch", 1, Box::new(|d| json!(d[0]))),
             _ => {
                 out.push(json!({"channel": ch, "type": t, "error": "unknown LPP type; rest not parsed", "rest_hex": hex::encode(&b[i..])}));
@@ -298,11 +302,13 @@ pub fn parse_neighbours(b: &[u8]) -> Result<(u16, Vec<Value>), String> {
 
 /// ACL: entries [key prefix (6), permissions].
 pub fn parse_acl(b: &[u8]) -> Value {
-    json!(b[4..]
-        .chunks_exact(7)
-        .filter(|c| c.iter().any(|&x| x != 0)) // zero padding; firmware skips permission-0 entries
-        .map(|c| json!({"key_prefix": hex::encode(&c[..6]), "permissions": c[6], "role": role(c[6])}))
-        .collect::<Vec<_>>())
+    json!(
+        b[4..]
+            .chunks_exact(7)
+            .filter(|c| c.iter().any(|&x| x != 0)) // zero padding; firmware skips permission-0 entries
+            .map(|c| json!({"key_prefix": hex::encode(&c[..6]), "permissions": c[6], "role": role(c[6])}))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// Owner info: "firmware version\nnode name\nowner info".
@@ -342,7 +348,6 @@ mod tests {
 
     #[test]
     fn lpp_roundtrip() {
-
         let b = lpp_telemetry(0.0, Some((61.4567, 23.8123, 120.0)));
         let v = parse_lpp(&b);
         assert_eq!(v[0]["value"], 0.0);
@@ -353,7 +358,6 @@ mod tests {
 
     #[test]
     fn lpp_ignores_padding() {
-
         let b = [1, 116, 0x01, 0x9C, 0, 0, 0, 0, 0, 0];
         assert_eq!(parse_lpp(&b).as_array().unwrap().len(), 1);
     }

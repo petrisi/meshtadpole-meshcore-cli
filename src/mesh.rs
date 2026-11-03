@@ -2,8 +2,8 @@
 
 use crate::crypto::{self, Identity, sha256};
 use crate::packet::{Packet, ROUTE_DIRECT, ROUTE_FLOOD, ROUTE_TRANSPORT_FLOOD, ptype};
-use hmac::{Hmac, Mac};
 use anyhow::{Result, bail};
+use hmac::{Hmac, Mac};
 
 /// Max DM / channel text length (firmware MAX_TEXT_LEN = 10 cipher blocks).
 pub const MAX_TEXT_LEN: usize = 160;

@@ -139,9 +139,7 @@ pub fn open_rw(path: &Path) -> Result<Connection> {
     if path.exists() {
         let c = Connection::open(path)?;
         for (t, col, ty) in ADDED {
-            let has: bool = c
-                .prepare(&format!("SELECT 1 FROM pragma_table_info('{t}') WHERE name='{col}'"))?
-                .exists([])?;
+            let has: bool = c.prepare(&format!("SELECT 1 FROM pragma_table_info('{t}') WHERE name='{col}'"))?.exists([])?;
             let table: bool = c.prepare(&format!("SELECT 1 FROM sqlite_master WHERE type='table' AND name='{t}'"))?.exists([])?;
             if table && !has {
                 c.execute_batch(&format!("ALTER TABLE {t} ADD COLUMN {col} {ty}"))?;
@@ -201,12 +199,33 @@ impl Writer {
                pkt_hash,src_key,src_hash,dest_hash,channel,data_json,error,dup_of)
              VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)",
             params![
-                self.s.id, t, f.data, f.data.len(), airtime_ms, f.rssi_dbm, f.snr_db, f.signal_rssi_dbm, f.freq_error_hz,
+                self.s.id,
+                t,
+                f.data,
+                f.data.len(),
+                airtime_ms,
+                f.rssi_dbm,
+                f.snr_db,
+                f.signal_rssi_dbm,
+                f.freq_error_hz,
                 d.status.as_str(),
-                p.map(|p| crate::packet::route_name(p.route())), p.map(|p| crate::packet::ptype_name(p.ptype())), p.map(|p| p.version()),
-                p.and_then(|p| p.transport_codes).map(|c| c[0]), p.and_then(|p| p.transport_codes).map(|c| c[1]),
-                p.map(|p| p.path_hash_size()), p.map(|p| p.path_count()), path, last_hop,
-                d.pkt_hash, d.src_key, d.src_hash, d.dest_hash, d.channel, d.data.as_ref().map(|v| v.to_string()), d.error, dup_of
+                p.map(|p| crate::packet::route_name(p.route())),
+                p.map(|p| crate::packet::ptype_name(p.ptype())),
+                p.map(|p| p.version()),
+                p.and_then(|p| p.transport_codes).map(|c| c[0]),
+                p.and_then(|p| p.transport_codes).map(|c| c[1]),
+                p.map(|p| p.path_hash_size()),
+                p.map(|p| p.path_count()),
+                path,
+                last_hop,
+                d.pkt_hash,
+                d.src_key,
+                d.src_hash,
+                d.dest_hash,
+                d.channel,
+                d.data.as_ref().map(|v| v.to_string()),
+                d.error,
+                dup_of
             ],
         )?;
         let id = self.s.c.last_insert_rowid();
@@ -250,8 +269,16 @@ impl Writer {
             "UPDATE nodes SET name=?2,adv_type=?3,flags=?4,latitude=?5,longitude=?6,feat1=?7,feat2=?8,advert_timestamp=?9,app_data_json=?10
              WHERE public_key=?1 AND (advert_timestamp IS NULL OR advert_timestamp<=?9)",
             params![
-                key, v["name"].as_str(), v["adv_type_name"].as_str(), v["flags"].as_i64(), v["latitude"].as_f64(), v["longitude"].as_f64(),
-                v["feat1"].as_i64(), v["feat2"].as_i64(), v["timestamp"].as_i64(), v.to_string()
+                key,
+                v["name"].as_str(),
+                v["adv_type_name"].as_str(),
+                v["flags"].as_i64(),
+                v["latitude"].as_f64(),
+                v["longitude"].as_f64(),
+                v["feat1"].as_i64(),
+                v["feat2"].as_i64(),
+                v["timestamp"].as_i64(),
+                v.to_string()
             ],
         )?;
         Ok(())
@@ -261,8 +288,17 @@ impl Writer {
 impl Writer {
     #[allow(clippy::too_many_arguments)]
     pub fn insert_tx(
-        &self, t: f64, raw: &[u8], airtime_ms: f64, route: &str, payload_type: &str, pkt_hash: &str, dest: Option<&str>,
-        data: &Value, attempt: u32, error: Option<&str>,
+        &self,
+        t: f64,
+        raw: &[u8],
+        airtime_ms: f64,
+        route: &str,
+        payload_type: &str,
+        pkt_hash: &str,
+        dest: Option<&str>,
+        data: &Value,
+        attempt: u32,
+        error: Option<&str>,
     ) -> Result<i64> {
         self.s.c.execute(
             "INSERT INTO tx_frames(session_id,tx_time,raw,len,airtime_ms,route,payload_type,pkt_hash,dest,data_json,attempt,error)

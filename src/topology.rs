@@ -34,7 +34,10 @@ impl Known {
                     None => (format!("prefix:{p}"), vec![]),
                 }
             }
-            _ => (format!("prefix:{p}"), c.iter().map(|(k, n, _)| format!("{}{}", &k[..12], n.as_deref().map(|n| format!(" {n}")).unwrap_or_default())).collect()),
+            _ => (
+                format!("prefix:{p}"),
+                c.iter().map(|(k, n, _)| format!("{}{}", &k[..12], n.as_deref().map(|n| format!(" {n}")).unwrap_or_default())).collect(),
+            ),
         }
     }
 }
@@ -65,7 +68,13 @@ pub fn build(c: &Connection, since: f64, me: Option<&str>) -> Result<Value> {
     let rows = store::query_json(c, "SELECT public_key, name, adv_type FROM nodes", &[])?;
     let mut keys: Vec<(String, Option<String>, Option<String>)> = rows
         .iter()
-        .map(|r| (r["public_key"].as_str().unwrap_or_default().to_string(), r["name"].as_str().map(String::from), r["adv_type"].as_str().map(String::from)))
+        .map(|r| {
+            (
+                r["public_key"].as_str().unwrap_or_default().to_string(),
+                r["name"].as_str().map(String::from),
+                r["adv_type"].as_str().map(String::from),
+            )
+        })
         .collect();
     let me = me.map(String::from).unwrap_or_else(|| "me".into());
     keys.push((me.clone(), Some("(this node)".into()), None));
@@ -104,7 +113,8 @@ pub fn build(c: &Connection, since: f64, me: Option<&str>) -> Result<Value> {
     )?;
     for f in &frames {
         let t = f["rx_time"].as_f64().unwrap_or(0.0);
-        let hops: Vec<String> = f["path"].as_str().unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(|h| node(h, &mut ambiguous)).collect();
+        let hops: Vec<String> =
+            f["path"].as_str().unwrap_or_default().split(',').filter(|s| !s.is_empty()).map(|h| node(h, &mut ambiguous)).collect();
         let mut chain = Vec::new();
         if let Some(k) = f["src_key"].as_str() {
             chain.push(k.to_string());
@@ -193,5 +203,4 @@ pub fn build(c: &Connection, since: f64, me: Option<&str>) -> Result<Value> {
         *by_source.entry(s).or_default() += 1;
     }
     Ok(json!({"me": me, "since": since, "edge_counts": by_source, "nodes": ids.into_values().collect::<Vec<_>>(), "edges": edges_json}))
-
 }

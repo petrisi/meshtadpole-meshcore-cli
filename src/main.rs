@@ -273,7 +273,8 @@ fn set_path(v: &mut Value, path: &str, val: Value) -> Result<()> {
     let last = parts[parts.len() - 1];
     let obj = cur.as_object_mut().ok_or_else(|| anyhow!("{path}: parent is not an object"))?;
     // Optional keys and `groups.<name>` may be created; other keys must exist.
-    let creatable = (parts.len() == 2 && (parts[0] == "groups" || parts[0] == "passwords")) || matches!(path, "node.latitude" | "node.longitude" | "usb_serial");
+    let creatable = (parts.len() == 2 && (parts[0] == "groups" || parts[0] == "passwords"))
+        || matches!(path, "node.latitude" | "node.longitude" | "usb_serial");
     if !obj.contains_key(last) && !creatable {
         bail!("no such key {last} in {path}");
     }
@@ -373,7 +374,11 @@ fn resolve_node(db: &std::path::Path, id: &str) -> Result<String> {
         return Ok(key);
     }
     let c = store::open_ro(db)?;
-    let rows = store::query_json(&c, "SELECT public_key, name FROM nodes WHERE name = ?2 OR (length(?1) >= 2 AND public_key LIKE ?1 || '%')", &[&key, &id])?;
+    let rows = store::query_json(
+        &c,
+        "SELECT public_key, name FROM nodes WHERE name = ?2 OR (length(?1) >= 2 AND public_key LIKE ?1 || '%')",
+        &[&key, &id],
+    )?;
     match rows.len() {
         1 => Ok(rows[0]["public_key"].as_str().unwrap_or_default().to_string()),
         0 => bail!("node not found: {id} (known from adverts only)"),
@@ -426,7 +431,6 @@ fn run(cli: &Cli) -> Result<()> {
                 if let Some(s) = cfg.node.flood_scope.as_deref().filter(|s| !s.is_empty() && *s != "none") {
                     mesh::region_key(s)?;
                 }
-
             }
             if *write || !set.is_empty() {
                 cfg.save(&cfg_path)?;
@@ -451,7 +455,10 @@ fn run(cli: &Cli) -> Result<()> {
         Cmd::Identity { generate, force } => {
             if *generate {
                 if cfg.node.private_key.is_some() && !force {
-                    bail!("identity exists (public key {}); use --force to replace it", cfg.identity()?.map(|i| i.public_hex()).unwrap_or_default());
+                    bail!(
+                        "identity exists (public key {}); use --force to replace it",
+                        cfg.identity()?.map(|i| i.public_hex()).unwrap_or_default()
+                    );
                 }
                 let mut cfg = cfg.clone();
                 cfg.node.private_key = Some(hex::encode(crypto::Identity::generate().prv));
@@ -476,11 +483,7 @@ fn run(cli: &Cli) -> Result<()> {
             print(&daemon::call(&cfg.api, &req)?);
         }
         Cmd::Send { to, text, flood, retries, wait, scope } => {
-            let channel = if to.starts_with('#') {
-                Some(to.clone())
-            } else {
-                to.strip_prefix("ch:").map(String::from)
-            };
+            let channel = if to.starts_with('#') { Some(to.clone()) } else { to.strip_prefix("ch:").map(String::from) };
             let req = match channel {
                 Some(ch) => {
                     if !cfg.channels.iter().any(|c| c.name == ch) {
@@ -524,7 +527,9 @@ fn run(cli: &Cli) -> Result<()> {
         Cmd::Anon { node, kind, retries } => {
             repeater::anon_kind(kind).ok_or_else(|| anyhow!("unknown kind {kind} (regions, owner, clock)"))?;
             let targets = resolve_targets(&cfg, &db_path, node)?;
-            print(&for_targets(&targets, |(key, _, _)| daemon::call(&cfg.api, &json!({"cmd": "anon_request", "to": key, "kind": kind, "retries": retries}))));
+            print(&for_targets(&targets, |(key, _, _)| {
+                daemon::call(&cfg.api, &json!({"cmd": "anon_request", "to": key, "kind": kind, "retries": retries}))
+            }));
         }
         Cmd::Rooms => {
             let c = store::open_ro(&db_path)?;
@@ -652,7 +657,10 @@ fn run(cli: &Cli) -> Result<()> {
         Cmd::Login { node, password, since } => {
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
-                let pw = password.clone().or_else(|| cfg.password_for(name.as_deref(), key)).ok_or_else(|| anyhow!("no password for {} in config `passwords`", name.as_deref().unwrap_or(key)))?;
+                let pw = password
+                    .clone()
+                    .or_else(|| cfg.password_for(name.as_deref(), key))
+                    .ok_or_else(|| anyhow!("no password for {} in config `passwords`", name.as_deref().unwrap_or(key)))?;
                 let mut req = json!({"cmd": "login", "to": key, "password": pw, "room": t.as_deref() == Some("room")});
                 if let Some(s) = since {
                     req["since"] = json!((store::now() as u64).saturating_sub(*s));
@@ -673,7 +681,10 @@ fn run(cli: &Cli) -> Result<()> {
         }
         Cmd::Remote { node, command, retries, wait, allow_disruptive } => {
             if !allow_disruptive && !repeater::is_harmless_command(command) {
-                bail!("`{}` may change or disrupt the node; use `set` for settings, or add --allow-disruptive", repeater::redact_command(command));
+                bail!(
+                    "`{}` may change or disrupt the node; use `set` for settings, or add --allow-disruptive",
+                    repeater::redact_command(command)
+                );
             }
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
@@ -739,18 +750,25 @@ fn run(cli: &Cli) -> Result<()> {
             if let Some(p) = set {
                 print(&daemon::call(&cfg.api, &json!({"cmd": "path_set", "to": key, "path": p}))?);
             } else if *reset {
-
                 print(&daemon::call(&cfg.api, &json!({"cmd": "path_reset", "to": key}))?);
             } else {
                 let c = store::open_ro(&db_path)?;
-                let row = store::query_json(&c, "SELECT public_key, name, out_path, out_path_len, out_path_time FROM nodes WHERE public_key=?1", &[&key])?;
+                let row = store::query_json(
+                    &c,
+                    "SELECT public_key, name, out_path, out_path_len, out_path_time FROM nodes WHERE public_key=?1",
+                    &[&key],
+                )?;
                 let mut v = row.into_iter().next().unwrap_or(json!({"public_key": key}));
                 if let Some(l) = v["out_path_len"].as_u64() {
                     let hs = ((l >> 6) + 1) as usize;
                     let p = v["out_path"].as_str().unwrap_or_default().to_string();
                     v["hops"] = json!(l & 63);
                     v["hash_size"] = json!(hs);
-                    v["route"] = json!(if l & 63 == 0 { "zero_hop".to_string() } else { (0..p.len() / (hs * 2)).map(|i| &p[i * hs * 2..(i + 1) * hs * 2]).collect::<Vec<_>>().join(",") });
+                    v["route"] = json!(if l & 63 == 0 {
+                        "zero_hop".to_string()
+                    } else {
+                        (0..p.len() / (hs * 2)).map(|i| &p[i * hs * 2..(i + 1) * hs * 2]).collect::<Vec<_>>().join(",")
+                    });
                 } else {
                     v["route"] = json!(null);
                     v["note"] = json!("no learned route: DMs and requests flood");
@@ -780,7 +798,11 @@ fn run(cli: &Cli) -> Result<()> {
             print(&for_targets(&targets, |(k, name, t)| {
                 let mut out = json!({"node": k, "name": name, "key": key, "disruptive": !safe});
                 // Secret keys cannot be compared (replies are redacted); write without read-back comparison.
-                let before = if secret { None } else { Some(repeater::get_value(cli(k, name, t, format!("get {key}"))?["reply"].as_str().unwrap_or_default())) };
+                let before = if secret {
+                    None
+                } else {
+                    Some(repeater::get_value(cli(k, name, t, format!("get {key}"))?["reply"].as_str().unwrap_or_default()))
+                };
                 out["before"] = json!(before.as_deref().map(shown));
                 out["after"] = json!(shown(value));
                 let changed = before.as_deref() != Some(value.as_str());
@@ -802,7 +824,8 @@ fn run(cli: &Cli) -> Result<()> {
                 }
                 if secret {
                     out["applied"] = Value::Null;
-                    out["note"] = json!("secret value: reply redacted, not verifiable by read-back; verify by logging in with the new value");
+                    out["note"] =
+                        json!("secret value: reply redacted, not verifiable by read-back; verify by logging in with the new value");
                     return Ok(out);
                 }
                 let after = repeater::get_value(cli(k, name, t, format!("get {key}"))?["reply"].as_str().unwrap_or_default());
@@ -815,10 +838,6 @@ fn run(cli: &Cli) -> Result<()> {
             }));
         }
         Cmd::Sql { query } => {
-
-
-
-
             let c = store::open_ro(&db_path)?;
             print(&json!(store::query_json(&c, query, &[])?));
         }

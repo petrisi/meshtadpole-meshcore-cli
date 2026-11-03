@@ -132,7 +132,6 @@ impl Default for Config {
                 telemetry: TelemetryConfig::default(),
                 flood_scope: None,
                 room_keepalive_s: room_keepalive(),
-
             },
             radio: RadioConfig {
                 frequency_mhz: 869.618,

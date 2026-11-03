@@ -331,7 +331,9 @@ fn send_channel_data(sh: &Shared, req: &Value) -> Result<Value> {
     };
     let heard = echoes(&rx, req["wait_s"].as_f64().unwrap_or(10.0));
     sh.unwait(&[wid]);
-    Ok(json!({"pkt_hash": h, "channel": name, "data_type": dt, "len": data.len(), "transmission": report_json(&r, 0, &route), "echoes": heard}))
+    Ok(
+        json!({"pkt_hash": h, "channel": name, "data_type": dt, "len": data.len(), "transmission": report_json(&r, 0, &route), "echoes": heard}),
+    )
 }
 
 /// DM with ACK wait and retries. Direct when a path is known (last attempt floods), else flood.
@@ -371,7 +373,11 @@ fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
         waiters.extend([wa, we]);
         ack_rx.push((attempt, ack, route.name(), ra));
         let data = json!({"to": to, "timestamp": ts, "text": text, "expected_ack": format!("{ack:08x}")});
-        let r = match sh.transmit(&p, meta(&p, &route, Some(to.to_string()), data, attempt), Duration::from_millis(rand::random::<u64>() % 400)) {
+        let r = match sh.transmit(
+            &p,
+            meta(&p, &route, Some(to.to_string()), data, attempt),
+            Duration::from_millis(rand::random::<u64>() % 400),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 sh.unwait(&waiters);
@@ -417,7 +423,14 @@ fn peer_key(req: &Value) -> Result<[u8; 32]> {
 }
 
 /// Send `p` and wait for the first event on `rx`: firmware timeout for the route plus `extra_s`.
-fn exchange(sh: &Shared, p: &Packet, route: &Route, m: TxMeta, rx: &std::sync::mpsc::Receiver<Value>, extra_s: f64) -> Result<(Value, Option<Value>, f64)> {
+fn exchange(
+    sh: &Shared,
+    p: &Packet,
+    route: &Route,
+    m: TxMeta,
+    rx: &std::sync::mpsc::Receiver<Value>,
+    extra_s: f64,
+) -> Result<(Value, Option<Value>, f64)> {
     let r = sh.transmit(p, m, Duration::from_millis(rand::random::<u64>() % 300))?;
     let t0 = Instant::now();
     let timeout = Duration::from_secs_f64(mesh::ack_timeout_ms(route, r.airtime_ms) / 1000.0 + extra_s);
@@ -435,7 +448,8 @@ fn discover(sh: &Shared, req: &Value) -> Result<Value> {
     let route = Route::zero_hop();
     let p = mesh::control(repeater::discover_payload(filter, tag), &route);
     let (wid, rx) = sh.wait_for(Match::Discover(tag));
-    let r = sh.transmit(&p, meta(&p, &route, None, json!({"discover_tag": format!("{tag:08x}"), "type_filter": filter}), 0), Duration::ZERO);
+    let r =
+        sh.transmit(&p, meta(&p, &route, None, json!({"discover_tag": format!("{tag:08x}"), "type_filter": filter}), 0), Duration::ZERO);
     let mut found = Vec::new();
     if r.is_ok() {
         let deadline = Instant::now() + Duration::from_secs_f64(req["wait_s"].as_f64().unwrap_or(8.0));
@@ -443,9 +457,9 @@ fn discover(sh: &Shared, req: &Value) -> Result<Value> {
             let Ok(ev) = rx.recv_timeout(left) else { break };
             // Name from the node table when known (adverts / owner info).
             let key = ev["data"]["public_key"].as_str().unwrap_or_default().to_string();
-            let name = store::open_ro(&sh.db).ok().and_then(|c| {
-                store::query_json(&c, "SELECT name FROM nodes WHERE public_key=?1", &[&key]).ok()?.into_iter().next()
-            });
+            let name = store::open_ro(&sh.db)
+                .ok()
+                .and_then(|c| store::query_json(&c, "SELECT name FROM nodes WHERE public_key=?1", &[&key]).ok()?.into_iter().next());
             found.push(json!({"public_key": key, "name": name.map(|n| n["name"].clone()), "node_type": ev["data"]["node_type"],
                 "snr_at_node_db": ev["data"]["snr"], "rssi": ev["rssi"], "snr": ev["snr"], "frame_id": ev["frame_id"]}));
         }
@@ -650,7 +664,12 @@ fn cli(sh: &Shared, req: &Value) -> Result<Value> {
             out["rtt_ms"] = json!(ms);
             out["rf"] = rf(&ev);
             if let Ok(c) = store::open_rw(&sh.db) {
-                let _ = store::insert_report(&c, &hex::encode(peer), "cli", &json!({"command": repeater::redact_command(command), "reply": reply}));
+                let _ = store::insert_report(
+                    &c,
+                    &hex::encode(peer),
+                    "cli",
+                    &json!({"command": repeater::redact_command(command), "reply": reply}),
+                );
             }
             out["transmissions"] = json!(txs);
             return Ok(out);
@@ -718,14 +737,11 @@ fn trace(sh: &Shared, req: &Value) -> Result<Value> {
         progress.push(json!({"hops_done": snrs.len(), "snrs": snrs, "heard_rssi": ev["rssi"], "heard_snr": ev["snr"], "t_ms": ms}));
     }
     sh.unwait(&[wid]);
-    let mut out = json!({"tag": format!("{tag:08x}"), "path": req["path"], "transmission": report_json(&r, 0, &route), "progress": progress});
+    let mut out =
+        json!({"tag": format!("{tag:08x}"), "path": req["path"], "transmission": report_json(&r, 0, &route), "progress": progress});
     match done {
         Some((ev, snrs, ms)) => {
-            let hops_json: Vec<Value> = hops
-                .iter()
-                .zip(snrs.iter())
-                .map(|(h, s)| json!({"hash": hex::encode(h), "snr_db": s}))
-                .collect();
+            let hops_json: Vec<Value> = hops.iter().zip(snrs.iter()).map(|(h, s)| json!({"hash": hex::encode(h), "snr_db": s})).collect();
             out["complete"] = json!(true);
             out["hops"] = json!(hops_json);
             out["final_snr_db"] = ev["snr"].clone();
@@ -803,14 +819,16 @@ fn leave_room(sh: &Shared, req: &Value) -> Result<Value> {
 fn rooms_status(sh: &Shared) -> Value {
     let now = Instant::now();
     let rooms = sh.rooms.lock().unwrap();
-    json!(rooms
-        .iter()
-        .map(|(k, r)| json!({
-            "public_key": hex::encode(k), "sync_since": r.sync_since, "misses": r.misses, "relogin_pending": r.relogin,
-            "has_password": r.password.is_some(), "last_ok": r.last_ok, "last_error": r.last_error,
-            "next_keepalive_in_s": r.next_ping.saturating_duration_since(now).as_secs(),
-        }))
-        .collect::<Vec<_>>())
+    json!(
+        rooms
+            .iter()
+            .map(|(k, r)| json!({
+                "public_key": hex::encode(k), "sync_since": r.sync_since, "misses": r.misses, "relogin_pending": r.relogin,
+                "has_password": r.password.is_some(), "last_ok": r.last_ok, "last_error": r.last_error,
+                "next_keepalive_in_s": r.next_ping.saturating_duration_since(now).as_secs(),
+            }))
+            .collect::<Vec<_>>()
+    )
 }
 
 /// Room keeper thread: keep-alives and re-logins for joined rooms (one room at a time).
@@ -908,7 +926,13 @@ fn keep_room(sh: &Shared, peer: [u8; 32]) -> Result<()> {
 fn path_set(sh: &Shared, req: &Value) -> Result<Value> {
     let peer = peer_key(req)?;
     let spec = req["path"].as_str().ok_or_else(|| anyhow!("path required"))?;
-    let hops: Vec<Vec<u8>> = spec.split(',').map(str::trim).filter(|h| !h.is_empty()).map(hex::decode).collect::<Result<_, _>>().map_err(|e| anyhow!("path: {e}"))?;
+    let hops: Vec<Vec<u8>> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(hex::decode)
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow!("path: {e}"))?;
     let hs = hops.first().map(Vec::len).unwrap_or(sh.cfg.node.path_hash_size as usize);
     if !(1..=3).contains(&hs) || hops.iter().any(|h| h.len() != hs) || hops.len() * hs > crate::packet::MAX_PATH_SIZE || hops.len() > 63 {
         bail!("path: hashes of equal size 1-3 bytes, at most 64 bytes");
@@ -928,8 +952,7 @@ fn path_set(sh: &Shared, req: &Value) -> Result<Value> {
         "previous": old.map(|(l, p)| json!({"path_len": l, "path": hex::encode(p)}))}))
 }
 
-fn handle_line(line: &str
-, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
+fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => return writeln!(w, "{}", json!({"error": format!("bad request: {e}")})),
@@ -1032,7 +1055,6 @@ fn signals(d: &Decoded) -> Vec<Sig> {
             v.push(Sig::Trace(u32::from_le_bytes([p.payload[0], p.payload[1], p.payload[2], p.payload[3]])));
         }
         (ptype::CONTROL, _) if p.payload.len() >= 6 && p.payload[0] >> 4 == 0x9 => {
-
             v.push(Sig::Discover(u32::from_le_bytes([p.payload[2], p.payload[3], p.payload[4], p.payload[5]])));
         }
         _ => {}
@@ -1041,8 +1063,7 @@ fn signals(d: &Decoded) -> Vec<Sig> {
 }
 
 impl Mc {
-    fn job(
-&self, p: Packet, route: &Route, dest: &[u8; 32], data: Value, delay_ms: u64) -> Job {
+    fn job(&self, p: Packet, route: &Route, dest: &[u8; 32], data: Value, delay_ms: u64) -> Job {
         let m = meta(&p, route, Some(hex::encode(dest)), data, 0);
         TxJob { frame: p.encode(), meta: m, delay: Duration::from_millis(delay_ms + rand::random::<u64>() % 300), done: None }
     }
@@ -1109,7 +1130,6 @@ impl Mc {
                 }
             }
             ptype::PATH if !b.is_empty() => {
-
                 let l = b[0];
                 let n = (l & 63) as usize * ((l >> 6) as usize + 1);
                 if (l >> 6) < 3 && b.len() > n {
@@ -1277,7 +1297,10 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         rooms.insert(k, RoomState::new(cfg.password_for(name.as_deref(), &kh), since, Instant::now() + Duration::from_secs(10)));
     }
     let out_paths: HashMap<[u8; 32], OutPath> = store::load_out_paths(&c)?.into_iter().map(|(k, l, p)| (k, (l, p))).collect();
-    let w = Writer { me: me.as_ref().map(|m| m.public_hex()), s: Session::start(c, env!("CARGO_PKG_VERSION"), "", &lora, &serde_json::to_string(&cfg.redacted())?)? };
+    let w = Writer {
+        me: me.as_ref().map(|m| m.public_hex()),
+        s: Session::start(c, env!("CARGO_PKG_VERSION"), "", &lora, &serde_json::to_string(&cfg.redacted())?)?,
+    };
     let (qtx, qrx) = channel::<Job>();
     let airtime = Arc::new(Airtime::default());
     let sh = Arc::new(Shared {
@@ -1324,8 +1347,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
     }
     {
         let sh = sh.clone();
-        ctrlc::set_handler
-(move || sh.stop.store(true, Ordering::SeqCst)).ok();
+        ctrlc::set_handler(move || sh.stop.store(true, Ordering::SeqCst)).ok();
     }
     eprintln!("{}", json!({"event": "started", "status": *sh.status.lock().unwrap()}));
     let lc = link::LinkConfig {

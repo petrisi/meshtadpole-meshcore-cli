@@ -85,7 +85,18 @@ pub struct Decoded {
 
 impl Decoded {
     fn new(status: Status) -> Decoded {
-        Decoded { status, packet: None, pkt_hash: None, src_key: None, src_hash: None, dest_hash: None, channel: None, data: None, error: None, peer_plain: None }
+        Decoded {
+            status,
+            packet: None,
+            pkt_hash: None,
+            src_key: None,
+            src_hash: None,
+            dest_hash: None,
+            channel: None,
+            data: None,
+            error: None,
+            peer_plain: None,
+        }
     }
 }
 
@@ -267,11 +278,7 @@ fn decode_payload(p: &Packet, keys: &Keys, d: &mut Decoded) {
                 return short(d, &ptype_name(t));
             }
             let mut v = json!({"channel_hash": format!("{:02x}", pl[0])});
-            let hit = keys
-                .channels
-                .iter()
-                .filter(|c| c.hash == pl[0])
-                .find_map(|c| mac_then_decrypt(&c.secret, &pl[1..]).map(|b| (c, b)));
+            let hit = keys.channels.iter().filter(|c| c.hash == pl[0]).find_map(|c| mac_then_decrypt(&c.secret, &pl[1..]).map(|b| (c, b)));
             match hit {
                 Some((c, b)) => {
                     d.channel = Some(c.name.clone());
@@ -445,7 +452,14 @@ pub fn to_json(d: &Decoded) -> Value {
             v["path"] = json!(p.path_hashes());
         }
     }
-    for (k, x) in [("pkt_hash", &d.pkt_hash), ("src_key", &d.src_key), ("src_hash", &d.src_hash), ("dest_hash", &d.dest_hash), ("channel", &d.channel), ("error", &d.error)] {
+    for (k, x) in [
+        ("pkt_hash", &d.pkt_hash),
+        ("src_key", &d.src_key),
+        ("src_hash", &d.src_hash),
+        ("dest_hash", &d.dest_hash),
+        ("channel", &d.channel),
+        ("error", &d.error),
+    ] {
         if let Some(x) = x {
             v[k] = json!(x);
         }

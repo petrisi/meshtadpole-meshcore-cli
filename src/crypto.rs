@@ -155,7 +155,8 @@ mod tests {
     use super::*;
 
     // Public test client key pair from MeshCore firmware (Identity.cpp validatePrivateKey).
-    const TEST_PRV: &str = "7065e18fd9fabb70c1ed90dca19907de698c88b709ea146eafd93d9b830c7b60c4681193c79bbc39945ba8064104bb618f8fd7a84a0af6f57033d6e8ddcd6471";
+    const TEST_PRV: &str =
+        "7065e18fd9fabb70c1ed90dca19907de698c88b709ea146eafd93d9b830c7b60c4681193c79bbc39945ba8064104bb618f8fd7a84a0af6f57033d6e8ddcd6471";
     const TEST_PUB: &str = "1ec77175b0918ed206f9ae04ec136d6d5d4315bb26305427f645b492e9350c10";
 
     #[test]
