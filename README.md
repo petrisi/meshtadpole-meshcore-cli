@@ -32,6 +32,33 @@ Exit codes: 0 ok, 1 error, 3 no device, 4 daemon not reachable.
 
 Docs: [docs/cli.md](docs/cli.md), [docs/schema.md](docs/schema.md).
 
+## Install
+
+Requirements: Rust >= 1.85 (rustup). The repos `meshtadpole-radio` and `meshtadpole-meshcore-cli` must be checked out side by side (path dependency until published).
+
+Linux (tested Ubuntu 26.04, kernel 7.0):
+
+```
+sudo apt install build-essential pkg-config libudev-dev
+cd meshtadpole-meshcore-cli && cargo build --release
+sudo install -m 755 target/release/tadpole-mc /usr/local/bin/
+```
+
+USB access: root works as is (the kernel `spi_ch341` driver is detached automatically). Non-root: udev rule in the `meshtadpole-radio` README.
+
+Windows (tested Windows 10):
+
+```
+cd meshtadpole-meshcore-cli
+cargo build --release
+mkdir %LOCALAPPDATA%\Programs\meshtadpole
+copy target\release\tadpole-mc.exe %LOCALAPPDATA%\Programs\meshtadpole\
+```
+
+Add that directory to PATH. The stick needs the WinUSB driver (Zadig, device `1a86:5512`); the vendor CH341PAR driver is not used.
+
+Then: `tadpole-mc config --write`, edit or `--set` the config, start `tadpole-mc daemon` (see "Running as a service").
+
 ## Running as a service
 
 The daemon reconnects to the stick on its own (backoff 1-30 s) and starts without it. It exits on database errors and when the radio loop is blocked for 120 s (`radio_events` `stalled`, exit code 70); run it under a service manager that restarts it.
