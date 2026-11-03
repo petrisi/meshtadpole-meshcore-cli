@@ -109,6 +109,9 @@ pub fn parse_status(b: &[u8]) -> Result<Value, String> {
     }))
 }
 
+/// LPP value converter.
+type Conv = Box<dyn Fn(&[u8]) -> Value>;
+
 /// Cayenne LPP (electroniccats/CayenneLPP as used by MeshCore): [channel][type][data]...
 pub fn parse_lpp(b: &[u8]) -> Value {
     let mut out = Vec::new();
@@ -120,7 +123,7 @@ pub fn parse_lpp(b: &[u8]) -> Value {
             break;
         }
         let d = &b[i + 2..];
-        let (name, size, val): (&str, usize, Box<dyn Fn(&[u8]) -> Value>) = match t {
+        let (name, size, val): (&str, usize, Conv) = match t {
             0 => ("digital_input", 1, Box::new(|d| json!(d[0]))),
             1 => ("digital_output", 1, Box::new(|d| json!(d[0]))),
             2 => ("analog_input", 2, Box::new(|d| json!(i16::from_be_bytes([d[0], d[1]]) as f64 / 100.0))),

@@ -105,7 +105,6 @@ pub fn trace(tag: u32, auth: u32, hash_size_code: u8, hashes: &[u8]) -> Packet {
 }
 
 /// Control packet (e.g. DISCOVER_REQ), unencrypted.
-
 pub fn control(payload: Vec<u8>, route: &Route) -> Packet {
     finish(ptype::CONTROL, payload, route)
 }

@@ -44,6 +44,9 @@ pub struct TxMeta {
 
 type Job = TxJob<TxMeta>;
 
+/// Learned route: raw path_len byte and path bytes.
+type OutPath = (u8, Vec<u8>);
+
 /// What an API call waits for.
 #[derive(Clone)]
 enum Match {
@@ -80,12 +83,13 @@ struct Shared {
     db: PathBuf,
     keys: RwLock<Keys>,
     /// Learned routes to peers: raw path_len byte and path bytes.
-    out_paths: Mutex<HashMap<[u8; 32], (u8, Vec<u8>)>>,
+    out_paths: Mutex<HashMap<[u8; 32], OutPath>>,
     subscribers: api::Subscribers,
     waiters: Mutex<Vec<Waiter>>,
     next_waiter: AtomicU64,
     tx_queue: Mutex<Sender<Job>>,
     airtime: Arc<Airtime>,
+    liveness: Arc<link::Liveness>,
     last_ts: Mutex<u32>,
     /// Successful logins this daemon session: peer -> login result.
     logins: Mutex<HashMap<[u8; 32], Value>>,
@@ -613,6 +617,7 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
             s["known_peer_keys"] = json!(sh.keys.read().unwrap().peers.values().map(Vec::len).sum::<usize>());
             s["known_out_paths"] = json!(sh.out_paths.lock().unwrap().len());
             s["tx_airtime_last_hour_ms"] = json!(sh.airtime.last_hour_ms());
+            s["loop_age_s"] = json!(sh.liveness.age_s().map(|a| (a * 10.0).round() / 10.0));
             s["duty_cycle_limit"] = json!(sh.cfg.node.duty_cycle_limit);
             s["duty_cycle_enforce"] = json!(sh.cfg.node.duty_cycle_enforce);
             return writeln!(w, "{s}");
@@ -849,7 +854,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
     for k in store::load_peer_keys(&c)? {
         keys.add_peer(k);
     }
-    let out_paths: HashMap<[u8; 32], (u8, Vec<u8>)> = store::load_out_paths(&c)?.into_iter().map(|(k, l, p)| (k, (l, p))).collect();
+    let out_paths: HashMap<[u8; 32], OutPath> = store::load_out_paths(&c)?.into_iter().map(|(k, l, p)| (k, (l, p))).collect();
     let w = Writer { me: me.as_ref().map(|m| m.public_hex()), s: Session::start(c, env!("CARGO_PKG_VERSION"), "", &lora, &serde_json::to_string(&cfg.redacted())?)? };
     let (qtx, qrx) = channel::<Job>();
     let airtime = Arc::new(Airtime::default());
@@ -863,6 +868,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         next_waiter: AtomicU64::new(1),
         tx_queue: Mutex::new(qtx),
         airtime: airtime.clone(),
+        liveness: Arc::new(link::Liveness::default()),
         last_ts: Mutex::new(0),
         logins: Mutex::new(HashMap::new()),
         status: Mutex::new(Value::Null),
@@ -898,8 +904,25 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         duty_cycle_limit: cfg.node.duty_cycle_limit,
         duty_cycle_enforce: cfg.node.duty_cycle_enforce,
         stats_interval: Duration::from_secs(60),
+        liveness: sh.liveness.clone(),
         agc_reset_interval: cfg.radio.agc_reset_interval_s.filter(|&s| s > 0).map(Duration::from_secs),
     };
+    {
+        // Blocked radio loop (no iteration for 120 s): record and exit for the service manager to restart.
+        let db = db.to_path_buf();
+        let sid = w.s.id;
+        link::spawn_watchdog(sh.liveness.clone(), Duration::from_secs(120), move |age| {
+            let msg = format!("radio loop blocked for {age:.0} s; exiting");
+            eprintln!("{}", json!({"event": "stalled", "detail": msg}));
+            if let Ok(c) = store::open_rw(&db) {
+                let _ = c.execute(
+                    "INSERT INTO radio_events(session_id,t,event,detail) VALUES(?1,?2,'stalled',?3)",
+                    meshtadpole_radio::store::rusqlite::params![sid, store::now(), msg],
+                );
+            }
+            std::process::exit(70);
+        });
+    }
     let mut h = Mc { sh: sh.clone(), w };
     let res = link::run(&lc, &mut h, &qrx, &airtime, &sh.stop).map_err(|e| anyhow!(e));
     h.w.s.end()?;

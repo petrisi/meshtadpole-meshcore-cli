@@ -8,7 +8,7 @@ Common tables (`sessions`, `radio_stats`, `radio_events`, `requests`) come from 
 |---|---|
 | sessions | one row per daemon run: started, last_alive (60 s heartbeat), ended (NULL = crashed or running), usb_serial, radio parameters, redacted config |
 | radio_stats | per 60 s: noise_min/avg/max (instantaneous RSSI ~1/s while idle, dBm), frames, crc_errors, header_errors, rx_airtime_ms |
-| radio_events | `connected`, `disconnected`, `open_failed`, `rx_restored` |
+| radio_events | `connected`, `disconnected`, `open_failed`, `rx_restored` (detail prefix: `agc_stuck`, `agc_periodic`, `mode_watchdog`), `stalled` (radio loop blocked 120 s; daemon exits 70) |
 | requests | daemon API requests that act on the mesh, with results |
 
 ## rx_frames

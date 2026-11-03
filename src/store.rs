@@ -292,8 +292,11 @@ pub fn insert_report(c: &Connection, key: &str, kind: &str, data: &Value) -> Res
     Ok(id)
 }
 
+/// Public key, raw path_len byte, path bytes.
+pub type KeyPath = ([u8; 32], u8, Vec<u8>);
+
 /// Learned out paths: (public key, raw path_len, path bytes).
-pub fn load_out_paths(c: &Connection) -> Result<Vec<([u8; 32], u8, Vec<u8>)>> {
+pub fn load_out_paths(c: &Connection) -> Result<Vec<KeyPath>> {
     let mut st = c.prepare("SELECT public_key, out_path_len, out_path FROM nodes WHERE out_path_len IS NOT NULL")?;
     let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u8>(1)?, r.get::<_, String>(2)?)))?;
     Ok(rows

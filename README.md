@@ -32,6 +32,31 @@ Exit codes: 0 ok, 1 error, 3 no device, 4 daemon not reachable.
 
 Docs: [docs/cli.md](docs/cli.md), [docs/schema.md](docs/schema.md).
 
+## Running as a service
+
+The daemon reconnects to the stick on its own (backoff 1-30 s) and starts without it. It exits on database errors and when the radio loop is blocked for 120 s (`radio_events` `stalled`, exit code 70); run it under a service manager that restarts it.
+
+Linux (systemd), `/etc/systemd/system/tadpole-mc.service`:
+
+```
+[Unit]
+Description=MeshCore node (tadpole-mc)
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/tadpole-mc daemon
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Non-root: add the udev rule from `meshtadpole-radio` README and set `User=`. Config/DB then live in that user's `~/.local/share/meshtadpole/`.
+
+Windows: Task Scheduler task "At startup", action `tadpole-mc.exe daemon`, settings "If the task fails, restart every 1 minute"; or a service wrapper (e.g. NSSM).
+
 ## Defaults (EU/UK Narrow, meshpirkanmaa.org)
 
 | Parameter | Value |
@@ -60,7 +85,7 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 - Phase 2 (transmit): adverts (zero hop / flood), channel messages, DMs with ACK and retries, path learning from PATH returns, automatic ACK / PATH replies, echo tracking of our own packets.
 - Phase 3 (management): DISCOVER of direct neighbours, login, status/telemetry/neighbours/ACL/owner requests, remote CLI commands, bulk targets, report history (`node_reports`).
 - Phase 4 (diagnostics): TRACE with per-hop SNR, topology graph from flood paths, neighbour reports, traces and discover replies, path hash resolution.
-- Next: hardening, Linux verification.
+- Phase 5 (hardening): radio loop watchdog (exit 70 on a blocked loop), `status.loop_age_s`, service setup, Linux verification.
 
 ## License
 

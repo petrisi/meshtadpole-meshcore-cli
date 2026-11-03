@@ -158,7 +158,8 @@ enum Cmd {
     },
     /// Remote CLI command (admin login required), e.g. `cmd 'Vuores North' 'get radio'`. Reply text returned.
     /// Not retried by default: a retry executes the command again.
-    Cmd {
+    #[command(name = "cmd")]
+    Remote {
         node: String,
         command: String,
         #[arg(long, default_value_t = 0)]
@@ -172,7 +173,8 @@ enum Cmd {
     /// hear us and we must hear the last.
     Trace {
         path: String,
-        /// Do not mirror the path.
+        /// Send PATH exactly as given (asymmetric routes, loops), e.g. `A,B,C`: out via A and B, back via C.
+        /// The result reaches us only if we hear the last hop.
         #[arg(long)]
         no_return: bool,
         /// Hash bytes per hop: 1, 2, 4 or 8.
@@ -251,9 +253,12 @@ fn identity_json(cfg: &Config) -> Result<Value> {
     }))
 }
 
+/// Target node: public key (hex), name, advert type.
+type Target = (String, Option<String>, Option<String>);
+
 /// Targets: node name / key prefix, comma list, or @group. Returns (key, name, adv_type), duplicates removed.
-fn resolve_targets(cfg: &Config, db: &std::path::Path, spec: &str) -> Result<Vec<(String, Option<String>, Option<String>)>> {
-    let mut out: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+fn resolve_targets(cfg: &Config, db: &std::path::Path, spec: &str) -> Result<Vec<Target>> {
+    let mut out: Vec<Target> = Vec::new();
     for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let ids = match part.strip_prefix('@') {
             Some(g) => cfg.groups.get(g).cloned().ok_or_else(|| anyhow!("unknown group @{g}"))?,
@@ -280,7 +285,7 @@ fn resolve_targets(cfg: &Config, db: &std::path::Path, spec: &str) -> Result<Vec
 }
 
 /// Run `f` for each target; one target -> its result, several -> {"targets":[{node, ok, result|error}]}.
-fn for_targets(targets: &[(String, Option<String>, Option<String>)], f: impl Fn(&(String, Option<String>, Option<String>)) -> Result<Value>) -> Value {
+fn for_targets(targets: &[Target], f: impl Fn(&Target) -> Result<Value>) -> Value {
     if targets.len() == 1 {
         return match f(&targets[0]) {
             Ok(v) => v,
@@ -547,7 +552,7 @@ fn run(cli: &Cli) -> Result<()> {
                 daemon::call(&cfg.api, &req)
             }));
         }
-        Cmd::Cmd { node, command, retries, wait } => {
+        Cmd::Remote { node, command, retries, wait } => {
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
                 let mut req = json!({"cmd": "cli", "to": key, "command": command, "retries": retries, "wait_s": wait, "room": t.as_deref() == Some("room")});
