@@ -94,6 +94,8 @@ struct Shared {
     last_ts: Mutex<u32>,
     /// Successful logins this daemon session: peer -> login result.
     logins: Mutex<HashMap<[u8; 32], Value>>,
+    /// Peers with an outstanding secret CLI command: their CLI reply is redacted before storage.
+    secret_pending: Mutex<HashMap<[u8; 32], Instant>>,
     status: Mutex<Value>,
     frames: AtomicU64,
     stop: AtomicBool,
@@ -500,27 +502,32 @@ fn cli(sh: &Shared, req: &Value) -> Result<Value> {
     let login = ensure_login(sh, peer, req)?;
     let retries = req["retries"].as_u64().unwrap_or(0) as u32;
     let mut txs = Vec::new();
-    let mut out = json!({"to": hex::encode(peer), "command": command});
+    let mut out = json!({"to": hex::encode(peer), "command": repeater::redact_command(command)});
     if let Some(l) = login {
         out["login"] = l;
+    }
+    if repeater::is_secret_command(command) {
+        sh.secret_pending.lock().unwrap().insert(peer, Instant::now());
     }
     for attempt in 0..=retries {
         let route = sh.route_to(&peer);
         let ts = sh.timestamp();
         let p = mesh::datagram(ptype::TXT_MSG, &me, &peer, &mesh::cli_plain(ts, command)?, &route)?;
         let (wid, rx) = sh.wait_for(Match::Cli { peer });
-        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"cli": command}), attempt);
+        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"cli": repeater::redact_command(command)}), attempt);
         let res = exchange(sh, &p, &route, m, &rx, req["wait_s"].as_f64().unwrap_or(5.0));
         sh.unwait(&[wid]);
         let (tx, ev, ms) = res?;
         txs.push(tx);
         if let Some(ev) = ev {
+            let secret = repeater::is_secret_command(command);
+            let reply = if secret { json!(crate::config::REDACTED) } else { ev["cli_reply"].clone() };
             out["ok"] = json!(true);
-            out["reply"] = ev["cli_reply"].clone();
+            out["reply"] = reply.clone();
             out["rtt_ms"] = json!(ms);
             out["rf"] = rf(&ev);
             if let Ok(c) = store::open_rw(&sh.db) {
-                let _ = store::insert_report(&c, &hex::encode(peer), "cli", &json!({"command": command, "reply": ev["cli_reply"]}));
+                let _ = store::insert_report(&c, &hex::encode(peer), "cli", &json!({"command": repeater::redact_command(command), "reply": reply}));
             }
             out["transmissions"] = json!(txs);
             return Ok(out);
@@ -658,6 +665,10 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
     if logged.get("password").is_some() {
         logged["password"] = json!(crate::config::REDACTED);
     }
+    if let Some(c) = logged["command"].as_str() {
+        logged["command"] = json!(repeater::redact_command(c));
+    }
+
     if let Ok(c) = store::open_rw(&sh.db) {
         let _ = meshtadpole_radio::store::log_request(&c, &logged, &out);
     }
@@ -826,7 +837,27 @@ impl link::Handler for Mc {
 
     fn frame(&mut self, t: f64, f: &sx1262::RxFrame, airtime: f64) -> Result<Vec<Job>, link::BoxError> {
         let sh = self.sh.clone();
-        let d = decode_frame(&f.data, f.crc_error, &sh.keys.read().unwrap());
+        let mut d = decode_frame(&f.data, f.crc_error, &sh.keys.read().unwrap());
+        // Secrets in remote CLI traffic: our outgoing command (heard back) and the reply to it.
+        if let (Some(p), Some((peer, dir, _))) = (&d.packet, &d.peer_plain) {
+            if p.ptype() == ptype::TXT_MSG {
+                let text = d.data.as_ref().and_then(|v| v["plain"]["text"].as_str()).unwrap_or_default().to_string();
+                let secret = match *dir {
+                    "out" => repeater::is_secret_command(&text),
+                    _ => {
+                        let mut sp = sh.secret_pending.lock().unwrap();
+                        sp.retain(|_, t| t.elapsed() < Duration::from_secs(120));
+                        d.data.as_ref().is_some_and(|v| v["plain"]["txt_type"] == "cli_data") && sp.remove(peer).is_some()
+                    }
+                };
+                if secret {
+                    if let Some(v) = d.data.as_mut() {
+                        v["plain"]["text"] = json!(crate::config::REDACTED);
+                    }
+                }
+            }
+        }
+
         if d.status == Status::Ok && d.packet.as_ref().is_some_and(|p| p.ptype() == ptype::ADVERT) {
             if let Some(k) = d.src_key.as_deref().and_then(|h| hex::decode(h).ok()).and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()) {
                 sh.keys.write().unwrap().add_peer(k);
@@ -914,6 +945,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         liveness: Arc::new(link::Liveness::default()),
         last_ts: Mutex::new(0),
         logins: Mutex::new(HashMap::new()),
+        secret_pending: Mutex::new(HashMap::new()),
         status: Mutex::new(Value::Null),
         frames: AtomicU64::new(0),
         stop: AtomicBool::new(false),

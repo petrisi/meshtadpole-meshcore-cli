@@ -157,7 +157,9 @@ enum Cmd {
         retries: u32,
     },
     /// Remote CLI command (admin login required), e.g. `cmd 'Vuores North' 'get radio'`. Reply text returned.
-    /// Not retried by default: a retry executes the command again.
+    /// Not retried by default: a retry executes the command again. Read-only commands, advert triggers,
+    /// `clock sync` and `set` on safe keys run as given; anything else (reboot, erase, ota, password,
+    /// radio/tx/repeat settings, ...) needs --allow-disruptive. Secret values/replies are redacted.
     #[command(name = "cmd")]
     Remote {
         node: String,
@@ -167,6 +169,21 @@ enum Cmd {
         /// Extra seconds to wait for the reply beyond the firmware timeout.
         #[arg(long, default_value_t = 5.0)]
         wait: f64,
+        #[arg(long)]
+        allow_disruptive: bool,
+    },
+    /// Guarded setting write on repeaters/room servers: reads KEY, shows before/after, writes with --apply,
+    /// reads back to verify. Safe keys: name, owner.info, lat, lon, advert.interval, flood.advert.interval;
+    /// other keys (radio, tx, repeat, flood.max, passwords, ...) also need --allow-disruptive.
+    Set {
+        node: String,
+        key: String,
+        value: String,
+        /// Write. Without it: read and compare only (dry run).
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        allow_disruptive: bool,
     },
     /// TRACE along repeaters, returning the SNR each hop received at. PATH: comma list of names / key
     /// prefixes. Round trip by default (A,B -> A,B,A) so the result returns to us; the first hop must
@@ -559,7 +576,10 @@ fn run(cli: &Cli) -> Result<()> {
                 daemon::call(&cfg.api, &req)
             }));
         }
-        Cmd::Remote { node, command, retries, wait } => {
+        Cmd::Remote { node, command, retries, wait, allow_disruptive } => {
+            if !allow_disruptive && !repeater::is_harmless_command(command) {
+                bail!("`{}` may change or disrupt the node; use `set` for settings, or add --allow-disruptive", repeater::redact_command(command));
+            }
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
                 let mut req = json!({"cmd": "cli", "to": key, "command": command, "retries": retries, "wait_s": wait, "room": t.as_deref() == Some("room")});
@@ -640,7 +660,64 @@ fn run(cli: &Cli) -> Result<()> {
                 print(&v);
             }
         }
+        Cmd::Set { node, key, value, apply, allow_disruptive } => {
+            let safe = repeater::SAFE_KEYS.contains(&key.as_str());
+            if !safe && !allow_disruptive {
+                bail!("{key} is not a safe key ({}); add --allow-disruptive", repeater::SAFE_KEYS.join(", "));
+            }
+            let secret = repeater::is_secret_command(key);
+            let targets = resolve_targets(&cfg, &db_path, node)?;
+            let cli = |key_hex: &str, name: &Option<String>, t: &Option<String>, command: String| -> Result<Value> {
+                let mut req = json!({"cmd": "cli", "to": key_hex, "command": command, "retries": 0, "wait_s": 5.0, "room": t.as_deref() == Some("room")});
+                if let Some(pw) = cfg.password_for(name.as_deref(), key_hex) {
+                    req["password"] = json!(pw);
+                }
+                let r = daemon::call(&cfg.api, &req)?;
+                if r["ok"] != true {
+                    bail!("{}", r["error"].as_str().unwrap_or("no reply"));
+                }
+                Ok(r)
+            };
+            let shown = |v: &str| if secret { config::REDACTED.to_string() } else { v.to_string() };
+            print(&for_targets(&targets, |(k, name, t)| {
+                let mut out = json!({"node": k, "name": name, "key": key, "disruptive": !safe});
+                // Secret keys cannot be compared (replies are redacted); write without read-back comparison.
+                let before = if secret { None } else { Some(repeater::get_value(cli(k, name, t, format!("get {key}"))?["reply"].as_str().unwrap_or_default())) };
+                out["before"] = json!(before.as_deref().map(shown));
+                out["after"] = json!(shown(value));
+                let changed = before.as_deref() != Some(value.as_str());
+                out["changed"] = json!(changed);
+                if !changed {
+                    out["note"] = json!("no change; nothing sent");
+                    return Ok(out);
+                }
+                if !apply {
+                    out["dry_run"] = json!(true);
+                    return Ok(out);
+                }
+                let r = cli(k, name, t, format!("set {key} {value}"))?;
+                let reply = r["reply"].as_str().unwrap_or_default().to_string();
+                out["set_reply"] = json!(shown(&reply));
+                if !secret && !reply.trim_start().to_uppercase().starts_with("OK") {
+                    out["applied"] = json!(false);
+                    return Ok(out);
+                }
+                if secret {
+                    out["applied"] = Value::Null;
+                    out["note"] = json!("secret value: reply redacted, not verifiable by read-back; verify by logging in with the new value");
+                    return Ok(out);
+                }
+                let after = repeater::get_value(cli(k, name, t, format!("get {key}"))?["reply"].as_str().unwrap_or_default());
+                let num = |s: &str| s.parse::<f64>().ok();
+                let ok = after == *value || (num(&after).is_some() && num(&after) == num(value));
+                out["read_back"] = json!(after);
+                out["verified"] = json!(ok);
+                out["applied"] = json!(ok);
+                Ok(out)
+            }));
+        }
         Cmd::Sql { query } => {
+
 
 
 

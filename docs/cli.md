@@ -54,11 +54,14 @@ Passwords: config `passwords`, keyed by node name or public key prefix; redacted
 | `login NODE [--password P]` | ANON_REQ login; result: ok, role (guest/read_only/read_write/admin), permissions, server_time, firmware_ver_level, rtt_ms. A wrong password gets no reply (`ok: false` after timeout). Login adds us to the node's ACL |
 | `request NODE status\|telemetry\|neighbours\|acl\|owner [--retries N]` | logs in first if not logged in this daemon session. status: RepeaterStats (batt_mv, noise_floor_dbm, packet/airtime counters, uptime_s, dups, errors). telemetry: Cayenne LPP sensors. neighbours: all pages, strongest first (key_prefix 6 bytes, heard_s_ago, snr_db). acl: key prefixes and roles (admin only). owner: firmware, name, owner_info (fills a missing node name) |
 | `path NODE [--reset]` | learned route to a node (`route`: `zero_hop` or hop hashes, `hops`, `hash_size`, `out_path_time`); `--reset` forgets it (daemon), so the next DM/request floods and the node's PATH return teaches a fresh route. Use when a direct route has gone stale |
-| `cmd NODE 'COMMAND' [--retries N] [--wait S]` | remote CLI (admin): e.g. `ver`, `clock`, `get radio`, `get repeat`, `set owner.info ...`, `neighbors`. Reply text returned. Default no retry (a retry executes again) |
+| `cmd NODE 'COMMAND' [--retries N] [--wait S] [--allow-disruptive]` | remote CLI (admin). Without --allow-disruptive only harmless commands run: `ver`, `clock`, `board`, `neighbors`, `region`, `gps`, `powersaving`, `get KEY` (not secrets), `sensor get/list`, `advert`, `advert.zerohop`, `clock sync`, `set` on safe keys. Everything else (reboot, erase, ota, password, prv.key, radio/tx/repeat/flood settings, region changes, ...) is refused locally (nothing transmitted). Reply text returned. Default no retry (a retry executes again) |
+| `set NODE KEY VALUE [--apply] [--allow-disruptive]` | guarded setting write: `get KEY` (before), compare, dry run unless --apply, `set KEY VALUE`, `get KEY` (read back; numeric values compared numerically). Result: before, after, changed, dry_run, set_reply, read_back, verified, applied. Safe keys: name, owner.info, lat, lon, advert.interval, flood.advert.interval; others need --allow-disruptive. Secret keys (prv.key, *password*, *secret*) are written without read-back (`applied: null`) |
 
 Routing: direct along the learned path when known (learned from the node's PATH return after a flooded login/request), else flood; the last retry floods. Requests use fresh timestamps (firmware replay protection). All results are stored in `node_reports`.
 
-Writes: plan, read before, write, read back, restore when testing. Disruptive settings (radio parameters, `prv.key`, `password`, `reboot`, `erase`, region, repeat off) can cut the node off the mesh; avoid unless intended.
+Secrets: commands touching `prv.key`, `password` or `secret` have their value and reply replaced by `<redacted>` in output, `requests`, `node_reports`, `tx_frames` and the stored copies of the CLI traffic in `rx_frames` (the reply to a pending secret command is redacted by the daemon).
+
+Writes: prefer `set` (read, dry run, write, verify). Plan, read before, write, read back, restore when testing. Disruptive settings (radio parameters, `prv.key`, `password`, `reboot`, `erase`, region, repeat off) can cut the node off the mesh; avoid unless intended.
 
 ## Diagnostics
 

@@ -108,6 +108,52 @@ pub fn lpp_telemetry(voltage_v: f64, gps: Option<(f64, f64, f64)>) -> Vec<u8> {
     b
 }
 
+/// Settings that `set` writes without --allow-disruptive (identity text, location, advert timing).
+pub const SAFE_KEYS: &[&str] = &["name", "owner.info", "lat", "lon", "advert.interval", "flood.advert.interval"];
+
+/// Remote CLI command touches a secret (private key, passwords, bridge secret): value and reply are redacted.
+pub fn is_secret_command(cmd: &str) -> bool {
+    let c = cmd.to_lowercase();
+    c.contains("prv.key") || c.contains("password") || c.contains("secret")
+}
+
+/// Command text with secret values replaced (`set guest.password x` -> `set guest.password <redacted>`).
+pub fn redact_command(cmd: &str) -> String {
+    if !is_secret_command(cmd) {
+        return cmd.to_string();
+    }
+    let w: Vec<&str> = cmd.split_whitespace().collect();
+    let keep = match w.first().map(|s| s.to_lowercase()) {
+        Some(ref s) if s == "set" || s == "get" => 2,
+        _ => 1,
+    };
+    let mut out: Vec<String> = w.iter().take(keep).map(|s| s.to_string()).collect();
+    if w.len() > keep {
+        out.push(crate::config::REDACTED.into());
+    }
+    out.join(" ")
+}
+
+/// Remote CLI command that changes nothing or only triggers adverts / clock sync: allowed without
+/// --allow-disruptive. `set` on SAFE_KEYS also qualifies.
+pub fn is_harmless_command(cmd: &str) -> bool {
+    let c = cmd.trim().to_lowercase();
+    let w: Vec<&str> = c.split_whitespace().collect();
+    match w.as_slice() {
+        ["ver"] | ["clock"] | ["board"] | ["neighbors"] | ["region"] | ["gps"] | ["powersaving"] => true,
+        ["advert"] | ["advert.zerohop"] | ["clock", "sync"] => true,
+        ["get", k, ..] => !is_secret_command(k),
+        ["sensor", "get", ..] | ["sensor", "list", ..] => true,
+        ["set", k, ..] => SAFE_KEYS.contains(k),
+        _ => false,
+    }
+}
+
+/// Value from a `get` reply ("> value").
+pub fn get_value(reply: &str) -> String {
+    reply.trim().trim_start_matches('>').trim().to_string()
+}
+
 /// RepeaterStats (56 bytes after the tag).
 pub fn parse_status(b: &[u8]) -> Result<Value, String> {
     let s = &b[4..];
@@ -233,7 +279,21 @@ mod tests {
     }
 
     #[test]
+    fn command_guards() {
+        assert!(is_harmless_command("get radio"));
+        assert!(is_harmless_command("set owner.info hello there"));
+        assert!(!is_harmless_command("set radio 869.5,62.5,8,8"));
+        assert!(!is_harmless_command("reboot"));
+        assert!(!is_harmless_command("get prv.key"));
+        assert_eq!(redact_command("set guest.password abc"), "set guest.password <redacted>");
+        assert_eq!(redact_command("password abc"), "password <redacted>");
+        assert_eq!(redact_command("get radio"), "get radio");
+        assert_eq!(get_value("> 869.6179809,62.5,8,8"), "869.6179809,62.5,8,8");
+    }
+
+    #[test]
     fn lpp_roundtrip() {
+
         let b = lpp_telemetry(0.0, Some((61.4567, 23.8123, 120.0)));
         let v = parse_lpp(&b);
         assert_eq!(v[0]["value"], 0.0);

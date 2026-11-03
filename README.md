@@ -95,7 +95,7 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 | Linux (Ubuntu 26.04.1, kernel 7.0) | working: build, tests, RX, TX (discover, trace), reconnect on attach |
 | Room servers (login implemented; post sync, keep-alive) | not tested / not implemented |
 | Region-scoped floods (transport codes) TX, anonymous requests, GRP_DATA TX | not implemented (RX decoded) |
-| Remote CLI writes with dry run / read-back guard | not implemented (`cmd` sends as given) |
+| Guarded setting writes (`set`: dry run, read-back), disruptive-command guard on `cmd`, secret redaction | working (on air) |
 
 Development phases:
 
