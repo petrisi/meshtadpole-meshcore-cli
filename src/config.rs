@@ -24,6 +24,9 @@ pub struct RadioConfig {
     pub coding_rate: u8,
     pub tx_power_dbm: i8,
     pub rx_boosted_gain: bool,
+    /// Preventive receiver (AGC) reset interval in seconds; null = off (stuck detection still active).
+    #[serde(default)]
+    pub agc_reset_interval_s: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,7 @@ impl Default for Config {
                 coding_rate: 8,
                 tx_power_dbm: 14,
                 rx_boosted_gain: true,
+                agc_reset_interval_s: None,
             },
             channels,
             api: DEFAULT_API.into(),

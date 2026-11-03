@@ -174,7 +174,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         duty_cycle_limit: cfg.node.duty_cycle_limit,
         duty_cycle_enforce: cfg.node.duty_cycle_enforce,
         stats_interval: Duration::from_secs(60),
-        agc_reset_interval: None,
+        agc_reset_interval: cfg.radio.agc_reset_interval_s.filter(|&s| s > 0).map(Duration::from_secs),
     };
     let mut h = Mc { sh: sh.clone(), w };
     let res = link::run(&lc, &mut h, &qrx, &airtime, &sh.stop).map_err(|e| anyhow!(e));
