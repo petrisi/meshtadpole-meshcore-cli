@@ -11,8 +11,9 @@ name = "tadpole-mc"
 path = "src/main.rs"
 
 [dependencies]
-# Switch to git dependency once published.
-meshtadpole-radio = { path = "../meshtadpole-radio", features = ["store"] }
+# Private until published: fetching needs git credentials (see README "Install").
+# Local checkouts side by side override this with ../.cargo/config.toml [patch].
+meshtadpole-radio = { git = "https://github.com/petrisi/meshtadpole-radio", features = ["store"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }

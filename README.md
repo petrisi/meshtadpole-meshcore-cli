@@ -34,7 +34,16 @@ Docs: [docs/cli.md](docs/cli.md), [docs/schema.md](docs/schema.md).
 
 ## Install
 
-Requirements: Rust >= 1.85 (rustup). The repos `meshtadpole-radio` and `meshtadpole-meshcore-cli` must be checked out side by side (path dependency until published).
+Requirements: Rust >= 1.85 (rustup), git.
+
+Dependency `meshtadpole-radio` comes from `https://github.com/petrisi/meshtadpole-radio` (currently private). For a clean clone, cargo needs git credentials: `gh auth login`, `gh auth setup-git`, and `[net] git-fetch-with-cli = true` in `~/.cargo/config.toml` (or env `CARGO_NET_GIT_FETCH_WITH_CLI=true`).
+
+Development with both repos checked out side by side: put this in `.cargo/config.toml` of the common parent directory (outside the repos) to build against the local checkout:
+
+```
+[patch."https://github.com/petrisi/meshtadpole-radio"]
+meshtadpole-radio = { path = "meshtadpole-radio" }
+```
 
 Linux (tested Ubuntu 26.04, kernel 7.0):
 
