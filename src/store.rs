@@ -81,7 +81,8 @@ FROM rx_frames WHERE payload_type='ADVERT' AND status='ok';
 CREATE VIEW IF NOT EXISTS v_channel_text AS
 SELECT id AS frame_id, rx_time, datetime(rx_time,'unixepoch') AS rx_utc, channel,
   json_extract(data_json,'$.plain.sender') AS sender, json_extract(data_json,'$.plain.text') AS text,
-  json_extract(data_json,'$.plain.timestamp') AS sender_timestamp, path_hops, path, rssi, snr
+  json_extract(data_json,'$.plain.timestamp') AS sender_timestamp, path_hops, path, rssi, snr,
+  tx_id IS NOT NULL AS own
 FROM rx_frames WHERE payload_type='GRP_TXT' AND status='ok' AND dup_of IS NULL;
 
 CREATE VIEW IF NOT EXISTS v_heard_repeaters AS
@@ -117,7 +118,8 @@ pub fn open_rw(path: &Path) -> Result<Connection> {
                 c.execute_batch(&format!("ALTER TABLE {t} ADD COLUMN {col} {ty}"))?;
             }
         }
-        c.execute_batch("DROP VIEW IF EXISTS v_packets")?;
+        // Views are recreated by the tool schema (they may reference new columns).
+        c.execute_batch("DROP VIEW IF EXISTS v_packets; DROP VIEW IF EXISTS v_channel_text;")?;
     }
     meshtadpole_radio::store::open_rw(path, SCHEMA, SCHEMA_VERSION).map_err(|e| anyhow!(e))
 }

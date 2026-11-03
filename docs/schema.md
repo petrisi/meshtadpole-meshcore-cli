@@ -86,5 +86,5 @@ Every transmission by this node, including automatic replies: raw, len, airtime_
 |---|---|
 | v_packets | rx_frames with rx_utc and src_name (from nodes) |
 | v_adverts | verified adverts (all copies; dup_of marks relays) |
-| v_channel_text | channel messages, first reception |
+| v_channel_text | channel messages, first reception; `own` = 1 for our own messages heard back |
 | v_heard_repeaters | per last_hop hash: frames, avg/min/max snr, avg rssi, first/last heard. Repeaters we receive directly |
