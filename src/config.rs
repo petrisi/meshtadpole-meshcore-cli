@@ -78,6 +78,10 @@ pub struct Config {
     /// Named node lists for bulk operations, referenced as `@name`.
     #[serde(default)]
     pub groups: std::collections::BTreeMap<String, Vec<String>>,
+    /// Repeater / room server passwords (max 15 bytes), keyed by node name or public key prefix (hex).
+    /// Redacted in all output and logs.
+    #[serde(default)]
+    pub passwords: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -111,6 +115,7 @@ impl Default for Config {
             api: DEFAULT_API.into(),
             usb_serial: None,
             groups: Default::default(),
+            passwords: Default::default(),
         }
     }
 }
@@ -179,6 +184,9 @@ impl Config {
         if c.node.private_key.is_some() {
             c.node.private_key = Some(REDACTED.into());
         }
+        for v in c.passwords.values_mut() {
+            *v = REDACTED.into();
+        }
         c
     }
 
@@ -201,6 +209,20 @@ impl Config {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
         Ok(())
+    }
+}
+
+impl Config {
+    /// Password for a node: entry keyed by its name, or by a hex prefix of its public key (longest wins).
+    pub fn password_for(&self, name: Option<&str>, key_hex: &str) -> Option<String> {
+        if let Some(p) = name.and_then(|n| self.passwords.get(n)) {
+            return Some(p.clone());
+        }
+        self.passwords
+            .iter()
+            .filter(|(k, _)| k.len() >= 2 && key_hex.starts_with(&k.to_lowercase()))
+            .max_by_key(|(k, _)| k.len())
+            .map(|(_, v)| v.clone())
     }
 }
 

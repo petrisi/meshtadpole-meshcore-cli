@@ -43,7 +43,23 @@ Automatic replies to frames addressed to us (first reception only):
 - PATH from a peer: learned route stored (`nodes.out_path`); if it arrived by flood, a reciprocal PATH return is sent along the learned route.
 - CLI messages: no ACK. Never repeats other nodes' packets.
 
+## Management (repeaters, room servers; daemon required)
+
+Passwords: config `passwords`, keyed by node name or public key prefix; redacted in all output and in the `requests` log. Set with `config --set 'passwords.Vuores North=...'`. NODE: name, key prefix, comma list or `@group` (config `groups`); several targets return `{"targets":[{node, name, ok, result|error}]}`.
+
+| Command | Effect |
+|---|---|
+| `discover [--types repeater,room,chat,sensor] [--wait S]` | zero-hop DISCOVER_REQ; direct neighbours answer with full key, type and the SNR they hear us at (`snr_at_node_db`). Answering nodes are added to `nodes` (name from adverts or owner info later). Nodes may be configured not to answer |
+| `login NODE [--password P]` | ANON_REQ login; result: ok, role (guest/read_only/read_write/admin), permissions, server_time, firmware_ver_level, rtt_ms. A wrong password gets no reply (`ok: false` after timeout). Login adds us to the node's ACL |
+| `request NODE status\|telemetry\|neighbours\|acl\|owner [--retries N]` | logs in first if not logged in this daemon session. status: RepeaterStats (batt_mv, noise_floor_dbm, packet/airtime counters, uptime_s, dups, errors). telemetry: Cayenne LPP sensors. neighbours: all pages, strongest first (key_prefix 6 bytes, heard_s_ago, snr_db). acl: key prefixes and roles (admin only). owner: firmware, name, owner_info (fills a missing node name) |
+| `cmd NODE 'COMMAND' [--retries N] [--wait S]` | remote CLI (admin): e.g. `ver`, `clock`, `get radio`, `get repeat`, `set owner.info ...`, `neighbors`. Reply text returned. Default no retry (a retry executes again) |
+
+Routing: direct along the learned path when known (learned from the node's PATH return after a flooded login/request), else flood; the last retry floods. Requests use fresh timestamps (firmware replay protection). All results are stored in `node_reports`.
+
+Writes: plan, read before, write, read back, restore when testing. Disruptive settings (radio parameters, `prv.key`, `password`, `reboot`, `erase`, region, repeat off) can cut the node off the mesh; avoid unless intended.
+
 ## Queries (read-only, daemon not required)
+
 
 | Command | Effect |
 |---|---|

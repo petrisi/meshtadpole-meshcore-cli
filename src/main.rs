@@ -4,6 +4,7 @@ mod daemon;
 mod decode;
 mod mesh;
 mod packet;
+mod repeater;
 mod store;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -129,6 +130,42 @@ enum Cmd {
     },
     /// One node by name, public key or key prefix: summary plus recent adverts.
     Node { id: String },
+    /// Zero-hop DISCOVER request: direct neighbours of the given types answer with key and the SNR they hear us at.
+    /// Answering nodes are added to the node table.
+    Discover {
+        /// Comma list of types: repeater (default), room, chat, sensor.
+        #[arg(long, default_value = "repeater")]
+        types: String,
+        #[arg(long, default_value_t = 8.0)]
+        wait: f64,
+    },
+    /// Log in to a repeater / room server with the password from config `passwords` (or --password).
+    Login {
+        node: String,
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Management request to repeaters/room servers: status, telemetry, neighbours, acl, owner.
+    /// Logs in first when needed and a password is configured. NODE: name, key prefix, comma list or @group.
+    /// Results are stored in node_reports.
+    Request {
+        node: String,
+        kind: String,
+        /// Retransmissions without response (last attempt floods).
+        #[arg(long, default_value_t = 1)]
+        retries: u32,
+    },
+    /// Remote CLI command (admin login required), e.g. `cmd 'Vuores North' 'get radio'`. Reply text returned.
+    /// Not retried by default: a retry executes the command again.
+    Cmd {
+        node: String,
+        command: String,
+        #[arg(long, default_value_t = 0)]
+        retries: u32,
+        /// Extra seconds to wait for the reply beyond the firmware timeout.
+        #[arg(long, default_value_t = 5.0)]
+        wait: f64,
+    },
     /// Read-only SQL against the database. Rows as JSON array.
     Sql { query: String },
     /// Print the database schema (DDL).
@@ -146,7 +183,7 @@ fn set_path(v: &mut Value, path: &str, val: Value) -> Result<()> {
     let last = parts[parts.len() - 1];
     let obj = cur.as_object_mut().ok_or_else(|| anyhow!("{path}: parent is not an object"))?;
     // Optional keys and `groups.<name>` may be created; other keys must exist.
-    let creatable = (parts.len() == 2 && parts[0] == "groups") || matches!(path, "node.latitude" | "node.longitude" | "usb_serial");
+    let creatable = (parts.len() == 2 && (parts[0] == "groups" || parts[0] == "passwords")) || matches!(path, "node.latitude" | "node.longitude" | "usb_serial");
     if !obj.contains_key(last) && !creatable {
         bail!("no such key {last} in {path}");
     }
@@ -187,6 +224,53 @@ fn identity_json(cfg: &Config) -> Result<Value> {
         "hash": id.as_ref().map(|i| format!("{:02x}", i.public[0])),
         "latitude": cfg.node.latitude, "longitude": cfg.node.longitude,
     }))
+}
+
+/// Targets: node name / key prefix, comma list, or @group. Returns (key, name, adv_type), duplicates removed.
+fn resolve_targets(cfg: &Config, db: &std::path::Path, spec: &str) -> Result<Vec<(String, Option<String>, Option<String>)>> {
+    let mut out: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let ids = match part.strip_prefix('@') {
+            Some(g) => cfg.groups.get(g).cloned().ok_or_else(|| anyhow!("unknown group @{g}"))?,
+            None => vec![part.to_string()],
+        };
+        for id in ids {
+            let key = resolve_node(db, &id)?;
+            if out.iter().any(|(k, _, _)| *k == key) {
+                continue;
+            }
+            let row = store::open_ro(db)
+                .ok()
+                .and_then(|c| store::query_json(&c, "SELECT name, adv_type FROM nodes WHERE public_key=?1", &[&key]).ok())
+                .and_then(|r| r.into_iter().next());
+            let name = row.as_ref().and_then(|r| r["name"].as_str().map(String::from));
+            let t = row.as_ref().and_then(|r| r["adv_type"].as_str().map(String::from));
+            out.push((key, name, t));
+        }
+    }
+    if out.is_empty() {
+        bail!("no targets");
+    }
+    Ok(out)
+}
+
+/// Run `f` for each target; one target -> its result, several -> {"targets":[{node, ok, result|error}]}.
+fn for_targets(targets: &[(String, Option<String>, Option<String>)], f: impl Fn(&(String, Option<String>, Option<String>)) -> Result<Value>) -> Value {
+    if targets.len() == 1 {
+        return match f(&targets[0]) {
+            Ok(v) => v,
+            Err(e) => json!({"error": format!("{e:#}")}),
+        };
+    }
+    let mut out = Vec::new();
+    for t in targets {
+        eprintln!("{}", json!({"target": t.0, "name": t.1}));
+        out.push(match f(t) {
+            Ok(v) => json!({"node": t.0, "name": t.1, "ok": v["ok"] != false, "result": v}),
+            Err(e) => json!({"node": t.0, "name": t.1, "ok": false, "error": format!("{e:#}")}),
+        });
+    }
+    json!({"targets": out})
 }
 
 /// Node name, full key or key prefix -> full public key (hex). Must be unique.
@@ -232,6 +316,9 @@ fn run(cli: &Cli) -> Result<()> {
                     let (p, val) = s.split_once('=').ok_or_else(|| anyhow!("expected PATH=VALUE: {s}"))?;
                     if p == "node.private_key" {
                         bail!("node.private_key cannot be set here; use `identity --generate` or edit the config file");
+                    }
+                    if val.contains(config::REDACTED) {
+                        bail!("value contains {}; secrets cannot be written through redacted output", config::REDACTED);
                     }
                     let val = serde_json::from_str(val).unwrap_or(Value::String(val.to_string()));
                     set_path(&mut v, p, val)?;
@@ -410,7 +497,43 @@ fn run(cli: &Cli) -> Result<()> {
             )?;
             print(&json!({"node": node, "adverts": adverts}));
         }
+        Cmd::Discover { types, wait } => {
+            let mut filter = 0u8;
+            for t in types.split(',').map(str::trim) {
+                filter |= 1 << config::adv_type_code(t)?;
+            }
+            print(&daemon::call(&cfg.api, &json!({"cmd": "discover", "type_filter": filter, "wait_s": wait}))?);
+        }
+        Cmd::Login { node, password } => {
+            let targets = resolve_targets(&cfg, &db_path, node)?;
+            print(&for_targets(&targets, |(key, name, t)| {
+                let pw = password.clone().or_else(|| cfg.password_for(name.as_deref(), key)).ok_or_else(|| anyhow!("no password for {} in config `passwords`", name.as_deref().unwrap_or(key)))?;
+                daemon::call(&cfg.api, &json!({"cmd": "login", "to": key, "password": pw, "room": t.as_deref() == Some("room")}))
+            }));
+        }
+        Cmd::Request { node, kind, retries } => {
+            repeater::kind(kind).ok_or_else(|| anyhow!("unknown kind {kind} (status, telemetry, neighbours, acl, owner)"))?;
+            let targets = resolve_targets(&cfg, &db_path, node)?;
+            print(&for_targets(&targets, |(key, name, t)| {
+                let mut req = json!({"cmd": "request", "to": key, "kind": kind, "retries": retries, "room": t.as_deref() == Some("room")});
+                if let Some(pw) = cfg.password_for(name.as_deref(), key) {
+                    req["password"] = json!(pw);
+                }
+                daemon::call(&cfg.api, &req)
+            }));
+        }
+        Cmd::Cmd { node, command, retries, wait } => {
+            let targets = resolve_targets(&cfg, &db_path, node)?;
+            print(&for_targets(&targets, |(key, name, t)| {
+                let mut req = json!({"cmd": "cli", "to": key, "command": command, "retries": retries, "wait_s": wait, "room": t.as_deref() == Some("room")});
+                if let Some(pw) = cfg.password_for(name.as_deref(), key) {
+                    req["password"] = json!(pw);
+                }
+                daemon::call(&cfg.api, &req)
+            }));
+        }
         Cmd::Sql { query } => {
+
             let c = store::open_ro(&db_path)?;
             print(&json!(store::query_json(&c, query, &[])?));
         }

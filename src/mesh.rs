@@ -82,6 +82,34 @@ pub fn datagram(t: u8, me: &Identity, peer: &[u8; 32], plain: &[u8], route: &Rou
     Ok(finish(t, pl, route))
 }
 
+/// Anonymous request (login, anonymous queries): dest hash, our public key, MAC + ciphertext.
+pub fn anon_req(me: &Identity, peer: &[u8; 32], plain: &[u8], route: &Route) -> Result<Packet> {
+    let secret = me.shared_secret(peer)?;
+    let mut pl = vec![peer[0]];
+    pl.extend(me.public);
+    pl.extend(crypto::encrypt_then_mac(&secret, plain));
+    if pl.len() > crate::packet::MAX_PAYLOAD {
+        bail!("payload too long");
+    }
+    Ok(finish(ptype::ANON_REQ, pl, route))
+}
+
+/// Control packet (e.g. DISCOVER_REQ), unencrypted.
+pub fn control(payload: Vec<u8>, route: &Route) -> Packet {
+    finish(ptype::CONTROL, payload, route)
+}
+
+/// Remote CLI command plaintext: timestamp, flags (TXT_TYPE_CLI_DATA << 2), command. No ACK is returned.
+pub fn cli_plain(timestamp: u32, command: &str) -> Result<Vec<u8>> {
+    if command.len() > MAX_TEXT_LEN {
+        bail!("command longer than {MAX_TEXT_LEN} bytes");
+    }
+    let mut p = timestamp.to_le_bytes().to_vec();
+    p.push(1 << 2);
+    p.extend(command.as_bytes());
+    Ok(p)
+}
+
 /// Plain text DM plaintext and the ACK code the recipient will return:
 /// sha256(timestamp || flags || text, sender public key)[0..4] as LE u32 (firmware composeMsgPacket).
 pub fn text_plain(me: &Identity, timestamp: u32, attempt: u8, text: &str) -> Result<(Vec<u8>, u32)> {

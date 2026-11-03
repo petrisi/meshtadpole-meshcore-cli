@@ -1,6 +1,6 @@
 # Database schema
 
-SQLite, WAL mode. `meta.schema_version` = 2 (v1 databases are migrated on daemon start). Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
+SQLite, WAL mode. `meta.schema_version` = 3 (older databases are migrated on daemon start). Full DDL: `tadpole-mc schema`. Times are Unix seconds (REAL, host clock). Keys and hashes are lowercase hex.
 
 Common tables (`sessions`, `radio_stats`, `radio_events`, `requests`) come from `meshtadpole-radio` and have the same meaning as in `tadpole-mt`:
 
@@ -76,6 +76,10 @@ One row per public key, from verified adverts.
 
 Our own adverts heard back are stored in rx_frames (with tx_id) but not as a node.
 
+## node_reports
+
+Management results, one row per successful login/request/CLI command: t, public_key, kind (`login`, `status`, `telemetry`, `neighbours`, `acl`, `owner`, `cli`), data_json (parsed result as returned by the CLI). Nodes added by DISCOVER have no name until an advert or owner report.
+
 ## tx_frames
 
 Every transmission by this node, including automatic replies: raw, len, airtime_ms, route (`flood`, `direct`, `zero_hop`), payload_type, pkt_hash, dest (peer key or channel name), data_json (what was sent; automatic replies: `reply`), attempt, error (e.g. duty cycle refusal). Repeats heard: `SELECT * FROM rx_frames WHERE tx_id = ?`.
@@ -87,4 +91,5 @@ Every transmission by this node, including automatic replies: raw, len, airtime_
 | v_packets | rx_frames with rx_utc and src_name (from nodes) |
 | v_adverts | verified adverts (all copies; dup_of marks relays) |
 | v_channel_text | channel messages, first reception; `own` = 1 for our own messages heard back |
+| v_repeater_status | status reports: batt_mv, noise_floor_dbm, uptime_s, packet and airtime counters, errors, dups (history per node) |
 | v_heard_repeaters | per last_hop hash: frames, avg/min/max snr, avg rssi, first/last heard. Repeaters we receive directly |

@@ -7,11 +7,16 @@
 //! - `{"cmd":"advert","flood":bool,"wait_s":f}` -> transmission and echoes heard.
 //! - `{"cmd":"send_text","to":"<64 hex key>","text":"..","retries":n,"flood":bool}` -> ACK result.
 //! - `{"cmd":"send_channel","channel":"<name>","text":"..","wait_s":f}` -> transmission and echoes heard.
+//! - `{"cmd":"discover","wait_s":f,"type_filter":n}` -> nodes answering a zero-hop DISCOVER_REQ.
+//! - `{"cmd":"login","to":"<key>","password":"..","room":bool}` -> login result (password redacted in logs).
+//! - `{"cmd":"request","to":"<key>","kind":"status|telemetry|neighbours|acl|owner","password":".."}` -> parsed response.
+//! - `{"cmd":"cli","to":"<key>","command":"..","password":".."}` -> command reply text.
 
 use crate::config::Config;
 use crate::decode::{Decoded, Keys, Status, decode_frame, to_json};
 use crate::mesh::{self, Route};
 use crate::packet::{Packet, ptype, ptype_name};
+use crate::repeater;
 use crate::store::{self, Writer};
 use anyhow::{Context, Result, anyhow, bail};
 use meshtadpole_radio::link::{self, Airtime, TxJob, TxReport};
@@ -45,6 +50,19 @@ enum Match {
     Ack(u32),
     /// Our own packet repeated by a repeater (same packet hash).
     Echo(String),
+    /// RESPONSE (or PATH with RESPONSE extra) from a peer; tag = reflected request timestamp (None: any).
+    Response { peer: [u8; 32], tag: Option<u32> },
+    /// CLI reply (TXT_MSG of type CLI data) from a peer.
+    Cli { peer: [u8; 32] },
+    /// DISCOVER_RESP carrying our tag.
+    Discover(u32),
+}
+
+/// What a received frame offers to waiters.
+enum Sig {
+    Response { peer: [u8; 32], plain: Vec<u8> },
+    Cli { peer: [u8; 32], text: String },
+    Discover(u32),
 }
 
 struct Waiter {
@@ -65,6 +83,8 @@ struct Shared {
     tx_queue: Mutex<Sender<Job>>,
     airtime: Arc<Airtime>,
     last_ts: Mutex<u32>,
+    /// Successful logins this daemon session: peer -> login result.
+    logins: Mutex<HashMap<[u8; 32], Value>>,
     status: Mutex<Value>,
     frames: AtomicU64,
     stop: AtomicBool,
@@ -98,14 +118,46 @@ impl Shared {
         self.waiters.lock().unwrap().retain(|w| !ids.contains(&w.id));
     }
 
-    fn notify(&self, acks: &[u32], pkt_hash: Option<&str>, ev: &Value) {
+    fn notify(&self, acks: &[u32], pkt_hash: Option<&str>, sigs: &[Sig], ev: &Value) {
         self.waiters.lock().unwrap().retain(|w| {
-            let hit = match &w.m {
-                Match::Ack(a) => acks.contains(a),
-                Match::Echo(h) => Some(h.as_str()) == pkt_hash,
-            };
-            !hit || w.tx.send(ev.clone()).is_ok()
+            let mut out = None;
+            match &w.m {
+                Match::Ack(a) if acks.contains(a) => out = Some(ev.clone()),
+                Match::Echo(h) if Some(h.as_str()) == pkt_hash => out = Some(ev.clone()),
+                m => {
+                    for s in sigs {
+                        match (m, s) {
+                            (Match::Response { peer, tag }, Sig::Response { peer: p, plain })
+                                if peer == p && plain.len() >= 4 && tag.is_none_or(|t| plain[..4] == t.to_le_bytes()) =>
+                            {
+                                let mut e = ev.clone();
+                                e["response_hex"] = json!(hex::encode(plain));
+                                out = Some(e);
+                            }
+                            (Match::Cli { peer }, Sig::Cli { peer: p, text }) if peer == p => {
+                                let mut e = ev.clone();
+                                e["cli_reply"] = json!(text);
+                                out = Some(e);
+                            }
+                            (Match::Discover(t), Sig::Discover(tt)) if t == tt => out = Some(ev.clone()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            match out {
+                Some(e) => w.tx.send(e).is_ok(),
+                None => true,
+            }
         });
+    }
+
+    /// Learned direct route to a peer, else flood.
+    fn route_to(&self, peer: &[u8; 32]) -> Route {
+        match self.out_paths.lock().unwrap().get(peer) {
+            Some((l, p)) => Route::Direct { path_len: *l, path: p.clone() },
+            None => self.flood(),
+        }
     }
 
     /// Queue a packet and wait for the radio to send it.
@@ -252,6 +304,224 @@ fn send_text(sh: &Shared, req: &Value) -> Result<Value> {
     Ok(out)
 }
 
+fn peer_key(req: &Value) -> Result<[u8; 32]> {
+    let to = req["to"].as_str().ok_or_else(|| anyhow!("to required (64 hex public key)"))?;
+    hex::decode(to).ok().and_then(|b| b.try_into().ok()).ok_or_else(|| anyhow!("to must be a 64-hex public key"))
+}
+
+/// Send `p` and wait for the first event on `rx`: firmware timeout for the route plus `extra_s`.
+fn exchange(sh: &Shared, p: &Packet, route: &Route, m: TxMeta, rx: &std::sync::mpsc::Receiver<Value>, extra_s: f64) -> Result<(Value, Option<Value>, f64)> {
+    let r = sh.transmit(p, m, Duration::from_millis(rand::random::<u64>() % 300))?;
+    let t0 = Instant::now();
+    let timeout = Duration::from_secs_f64(mesh::ack_timeout_ms(route, r.airtime_ms) / 1000.0 + extra_s);
+    let ev = rx.recv_timeout(timeout).ok();
+    Ok((report_json(&r, 0, route), ev, (t0.elapsed().as_secs_f64() * 1000.0).round()))
+}
+
+fn rf(ev: &Value) -> Value {
+    json!({"frame_id": ev["frame_id"], "payload_type": ev["payload_type"], "route": ev["route"], "path": ev["path"], "rssi": ev["rssi"], "snr": ev["snr"]})
+}
+
+fn discover(sh: &Shared, req: &Value) -> Result<Value> {
+    let tag: u32 = rand::random();
+    let filter = req["type_filter"].as_u64().unwrap_or(1 << 2) as u8; // default: repeaters
+    let route = Route::zero_hop();
+    let p = mesh::control(repeater::discover_payload(filter, tag), &route);
+    let (wid, rx) = sh.wait_for(Match::Discover(tag));
+    let r = sh.transmit(&p, meta(&p, &route, None, json!({"discover_tag": format!("{tag:08x}"), "type_filter": filter}), 0), Duration::ZERO);
+    let mut found = Vec::new();
+    if r.is_ok() {
+        let deadline = Instant::now() + Duration::from_secs_f64(req["wait_s"].as_f64().unwrap_or(8.0));
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Ok(ev) = rx.recv_timeout(left) else { break };
+            // Name from the node table when known (adverts / owner info).
+            let key = ev["data"]["public_key"].as_str().unwrap_or_default().to_string();
+            let name = store::open_ro(&sh.db).ok().and_then(|c| {
+                store::query_json(&c, "SELECT name FROM nodes WHERE public_key=?1", &[&key]).ok()?.into_iter().next()
+            });
+            found.push(json!({"public_key": key, "name": name.map(|n| n["name"].clone()), "node_type": ev["data"]["node_type"],
+                "snr_at_node_db": ev["data"]["snr"], "rssi": ev["rssi"], "snr": ev["snr"], "frame_id": ev["frame_id"]}));
+        }
+    }
+    sh.unwait(&[wid]);
+    let r = r?;
+    Ok(json!({"tag": format!("{tag:08x}"), "transmission": report_json(&r, 0, &route), "responses": found}))
+}
+
+/// Login (ANON_REQ with password). Retries with a fresh timestamp (firmware replay protection).
+fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, retries: u32) -> Result<Value> {
+    let me = sh.me()?;
+    let mut txs = Vec::new();
+    for attempt in 0..=retries {
+        let route = if attempt == retries && attempt > 0 { sh.flood() } else { sh.route_to(&peer) };
+        let ts = sh.timestamp();
+        let plain = repeater::login_plain(ts, password, room.then_some(ts));
+        let p = mesh::anon_req(&me, &peer, &plain, &route)?;
+        let (wid, rx) = sh.wait_for(Match::Response { peer, tag: None });
+        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"login": true, "attempt": attempt}), attempt);
+        let res = exchange(sh, &p, &route, m, &rx, 4.0);
+        sh.unwait(&[wid]);
+        let (tx, ev, ms) = res?;
+        txs.push(tx);
+        if let Some(ev) = ev {
+            let b = hex::decode(ev["response_hex"].as_str().unwrap_or_default())?;
+            let mut v = repeater::parse_login(&b);
+            v["rtt_ms"] = json!(ms);
+            v["rf"] = rf(&ev);
+            v["transmissions"] = json!(txs);
+            if v["ok"] == true {
+                sh.logins.lock().unwrap().insert(peer, v.clone());
+            }
+            if let Ok(c) = store::open_rw(&sh.db) {
+                let _ = store::insert_report(&c, &hex::encode(peer), "login", &v);
+            }
+            return Ok(v);
+        }
+    }
+    Ok(json!({"ok": false, "error": "no response (wrong password gets no reply)", "transmissions": txs}))
+}
+
+/// Log in first when not logged in this daemon session and a password is given.
+fn ensure_login(sh: &Shared, peer: [u8; 32], req: &Value) -> Result<Option<Value>> {
+    if sh.logins.lock().unwrap().contains_key(&peer) {
+        return Ok(None);
+    }
+    let Some(pw) = req["password"].as_str() else { return Ok(None) };
+    let v = login(sh, peer, pw, req["room"].as_bool().unwrap_or(false), 1)?;
+    if v["ok"] != true {
+        bail!("login failed: {v}");
+    }
+    Ok(Some(v))
+}
+
+/// Response plaintext, RF of the response frame, round trip ms.
+type Reply = (Vec<u8>, Value, f64);
+
+/// One REQ round trip; retries with fresh timestamps.
+fn req_once(sh: &Shared, peer: [u8; 32], req_type: u8, offset: u16, retries: u32) -> Result<(Option<Reply>, Vec<Value>)> {
+    let me = sh.me()?;
+    let mut txs = Vec::new();
+    for attempt in 0..=retries {
+        let route = if attempt == retries && attempt > 0 { sh.flood() } else { sh.route_to(&peer) };
+        let ts = sh.timestamp();
+        let p = mesh::datagram(ptype::REQ, &me, &peer, &repeater::request_plain(ts, req_type, offset), &route)?;
+        let (wid, rx) = sh.wait_for(Match::Response { peer, tag: Some(ts) });
+        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"request": req_type, "offset": offset, "tag": ts}), attempt);
+        let res = exchange(sh, &p, &route, m, &rx, 4.0);
+        sh.unwait(&[wid]);
+        let (tx, ev, ms) = res?;
+        txs.push(tx);
+        if let Some(ev) = ev {
+            let b = hex::decode(ev["response_hex"].as_str().unwrap_or_default())?;
+            return Ok((Some((b, rf(&ev), ms)), txs));
+        }
+    }
+    Ok((None, txs))
+}
+
+fn request(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let kind = req["kind"].as_str().ok_or_else(|| anyhow!("kind required"))?;
+    let rt = repeater::kind(kind).ok_or_else(|| anyhow!("unknown kind {kind} (status, telemetry, neighbours, acl, owner)"))?;
+    let retries = req["retries"].as_u64().unwrap_or(1) as u32;
+    let login = ensure_login(sh, peer, req)?;
+    let mut txs = Vec::new();
+    let mut out = json!({"to": hex::encode(peer), "kind": kind});
+    if let Some(l) = login {
+        out["login"] = l;
+    }
+    let data = if rt == repeater::REQ_NEIGHBOURS {
+        let mut all = Vec::new();
+        let mut total = 0;
+        loop {
+            let (r, t) = req_once(sh, peer, rt, all.len() as u16, retries)?;
+            txs.extend(t);
+            let Some((b, rfv, ms)) = r else { break };
+            let (tot, page) = repeater::parse_neighbours(&b).map_err(|e| anyhow!(e))?;
+            total = tot;
+            out["rf"] = rfv;
+            out["rtt_ms"] = json!(ms);
+            let n = page.len();
+            all.extend(page);
+            if n == 0 || all.len() >= total as usize {
+                break;
+            }
+        }
+        if out.get("rf").is_none() { None } else { Some(json!({"total": total, "neighbours": all})) }
+    } else {
+        let (r, t) = req_once(sh, peer, rt, 0, retries)?;
+        txs = t;
+        match r {
+            Some((b, rfv, ms)) => {
+                out["rf"] = rfv;
+                out["rtt_ms"] = json!(ms);
+                Some(match rt {
+                    repeater::REQ_STATUS => repeater::parse_status(&b).map_err(|e| anyhow!(e))?,
+                    repeater::REQ_TELEMETRY => json!({"sensors": repeater::parse_lpp(&b[4..])}),
+                    repeater::REQ_ACL => json!({"entries": repeater::parse_acl(&b)}),
+                    _ => repeater::parse_owner(&b),
+                })
+            }
+            None => None,
+        }
+    };
+    out["transmissions"] = json!(txs);
+    match data {
+        Some(d) => {
+            if let Ok(c) = store::open_rw(&sh.db) {
+                let _ = store::insert_report(&c, &hex::encode(peer), kind, &d);
+            }
+            out["ok"] = json!(true);
+            out["data"] = d;
+        }
+        None => {
+            out["ok"] = json!(false);
+            out["error"] = json!("no response (not logged in, no permission, or out of range)");
+        }
+    }
+    Ok(out)
+}
+
+/// Remote CLI command. Not retried by default: a retry with a new timestamp executes the command again.
+fn cli(sh: &Shared, req: &Value) -> Result<Value> {
+    let peer = peer_key(req)?;
+    let command = req["command"].as_str().ok_or_else(|| anyhow!("command required"))?;
+    let me = sh.me()?;
+    let login = ensure_login(sh, peer, req)?;
+    let retries = req["retries"].as_u64().unwrap_or(0) as u32;
+    let mut txs = Vec::new();
+    let mut out = json!({"to": hex::encode(peer), "command": command});
+    if let Some(l) = login {
+        out["login"] = l;
+    }
+    for attempt in 0..=retries {
+        let route = sh.route_to(&peer);
+        let ts = sh.timestamp();
+        let p = mesh::datagram(ptype::TXT_MSG, &me, &peer, &mesh::cli_plain(ts, command)?, &route)?;
+        let (wid, rx) = sh.wait_for(Match::Cli { peer });
+        let m = meta(&p, &route, Some(hex::encode(peer)), json!({"cli": command}), attempt);
+        let res = exchange(sh, &p, &route, m, &rx, req["wait_s"].as_f64().unwrap_or(5.0));
+        sh.unwait(&[wid]);
+        let (tx, ev, ms) = res?;
+        txs.push(tx);
+        if let Some(ev) = ev {
+            out["ok"] = json!(true);
+            out["reply"] = ev["cli_reply"].clone();
+            out["rtt_ms"] = json!(ms);
+            out["rf"] = rf(&ev);
+            if let Ok(c) = store::open_rw(&sh.db) {
+                let _ = store::insert_report(&c, &hex::encode(peer), "cli", &json!({"command": command, "reply": ev["cli_reply"]}));
+            }
+            out["transmissions"] = json!(txs);
+            return Ok(out);
+        }
+    }
+    out["ok"] = json!(false);
+    out["error"] = json!("no reply (not logged in as admin, unknown command, or out of range)");
+    out["transmissions"] = json!(txs);
+    Ok(out)
+}
+
 fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -277,11 +547,22 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "advert" => advert(sh, &req),
         "send_text" => send_text(sh, &req),
         "send_channel" => send_channel(sh, &req),
+        "discover" => discover(sh, &req),
+        "login" => peer_key(&req).and_then(|p| {
+            let pw = req["password"].as_str().ok_or_else(|| anyhow!("password required"))?;
+            login(sh, p, pw, req["room"].as_bool().unwrap_or(false), req["retries"].as_u64().unwrap_or(1) as u32)
+        }),
+        "request" => request(sh, &req),
+        "cli" => cli(sh, &req),
         other => Err(anyhow!("unknown cmd {other:?}")),
     };
     let out = res.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
+    let mut logged = req.clone();
+    if logged.get("password").is_some() {
+        logged["password"] = json!(crate::config::REDACTED);
+    }
     if let Ok(c) = store::open_rw(&sh.db) {
-        let _ = meshtadpole_radio::store::log_request(&c, &req, &out);
+        let _ = meshtadpole_radio::store::log_request(&c, &logged, &out);
     }
     writeln!(w, "{out}")
 }
@@ -310,8 +591,33 @@ fn ack_codes(d: &Decoded) -> Vec<u32> {
     }
 }
 
+/// Waiter signals in a decoded frame: responses (RESPONSE or PATH+RESPONSE), CLI replies, DISCOVER_RESP tags.
+fn signals(d: &Decoded) -> Vec<Sig> {
+    let mut v = Vec::new();
+    let Some(p) = &d.packet else { return v };
+    match (p.ptype(), &d.peer_plain) {
+        (ptype::RESPONSE, Some((peer, "in", b))) => v.push(Sig::Response { peer: *peer, plain: b.clone() }),
+        (ptype::PATH, Some((peer, "in", b))) if !b.is_empty() => {
+            let n = (b[0] & 63) as usize * ((b[0] >> 6) as usize + 1);
+            if b.len() > 1 + n && b[1 + n] & 0x0F == ptype::RESPONSE {
+                v.push(Sig::Response { peer: *peer, plain: b[2 + n..].to_vec() });
+            }
+        }
+        (ptype::TXT_MSG, Some((peer, "in", b))) if b.len() > 5 && b[4] >> 2 == 1 => {
+            let end = b[5..].iter().position(|&x| x == 0).map(|i| 5 + i).unwrap_or(b.len());
+            v.push(Sig::Cli { peer: *peer, text: String::from_utf8_lossy(&b[5..end]).into_owned() });
+        }
+        (ptype::CONTROL, _) if p.payload.len() >= 6 && p.payload[0] >> 4 == 0x9 => {
+            v.push(Sig::Discover(u32::from_le_bytes([p.payload[2], p.payload[3], p.payload[4], p.payload[5]])));
+        }
+        _ => {}
+    }
+    v
+}
+
 impl Mc {
-    fn job(&self, p: Packet, route: &Route, dest: &[u8; 32], data: Value, delay_ms: u64) -> Job {
+    fn job(
+&self, p: Packet, route: &Route, dest: &[u8; 32], data: Value, delay_ms: u64) -> Job {
         let m = meta(&p, route, Some(hex::encode(dest)), data, 0);
         TxJob { frame: p.encode(), meta: m, delay: Duration::from_millis(delay_ms + rand::random::<u64>() % 300), done: None }
     }
@@ -410,7 +716,20 @@ impl link::Handler for Mc {
         if d.status == Status::CrcError {
             return Ok(vec![]);
         }
-        sh.notify(&ack_codes(&d), d.pkt_hash.as_deref(), &ev);
+        let sigs = signals(&d);
+        if let Some(p) = d.packet.as_ref().filter(|p| p.ptype() == ptype::CONTROL && d.status == Status::Ok) {
+            // DISCOVER_RESP with a full key: known node, direct neighbour.
+            if p.payload.first().is_some_and(|b| b >> 4 == 0x9) {
+                if let Some(k) = d.src_key.as_deref() {
+                    let kt = d.data.as_ref().and_then(|v| v["node_type"].as_str()).unwrap_or("unknown").to_string();
+                    self.w.upsert_discovered(t, k, &kt, id, f.rssi_dbm, f.snr_db)?;
+                    if let Some(kb) = hex::decode(k).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()) {
+                        sh.keys.write().unwrap().add_peer(kb);
+                    }
+                }
+            }
+        }
+        sh.notify(&ack_codes(&d), d.pkt_hash.as_deref(), &sigs, &ev);
         if dup_of.is_some() || d.status != Status::Ok {
             return Ok(vec![]);
         }
@@ -462,6 +781,7 @@ pub fn run(cfg: &Config, db: &Path) -> Result<()> {
         tx_queue: Mutex::new(qtx),
         airtime: airtime.clone(),
         last_ts: Mutex::new(0),
+        logins: Mutex::new(HashMap::new()),
         status: Mutex::new(Value::Null),
         frames: AtomicU64::new(0),
         stop: AtomicBool::new(false),

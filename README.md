@@ -58,7 +58,8 @@ MeshCore firmware v1.18.0 (`docs/packet_format.md`, `docs/payloads.md`, `src/Mes
 
 - Phase 1 (receive): decode and store of all payload types, advert signature verification, channel decryption, node table from adverts, flood path and last-hop recording.
 - Phase 2 (transmit): adverts (zero hop / flood), channel messages, DMs with ACK and retries, path learning from PATH returns, automatic ACK / PATH replies, echo tracking of our own packets.
-- Next: repeater/room management, diagnostics (TRACE, DISCOVER, topology).
+- Phase 3 (management): DISCOVER of direct neighbours, login, status/telemetry/neighbours/ACL/owner requests, remote CLI commands, bulk targets, report history (`node_reports`).
+- Next: diagnostics (TRACE, topology from paths and neighbour reports).
 
 ## License
 

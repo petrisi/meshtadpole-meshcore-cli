@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub use meshtadpole_radio::store::{COMMON_SCHEMA, now};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS rx_frames(
@@ -53,6 +53,25 @@ CREATE TABLE IF NOT EXISTS nodes(
   out_path TEXT, out_path_len INTEGER, out_path_time REAL
 );
 CREATE INDEX IF NOT EXISTS nodes_hash ON nodes(hash);
+
+CREATE TABLE IF NOT EXISTS node_reports(
+  id INTEGER PRIMARY KEY,
+  t REAL NOT NULL,
+  public_key TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  data_json TEXT
+);
+CREATE INDEX IF NOT EXISTS node_reports_key ON node_reports(public_key, kind, t);
+
+CREATE VIEW IF NOT EXISTS v_repeater_status AS
+SELECT r.id, r.t, datetime(r.t,'unixepoch') AS utc, r.public_key, n.name,
+  json_extract(r.data_json,'$.batt_mv') AS batt_mv, json_extract(r.data_json,'$.noise_floor_dbm') AS noise_floor_dbm,
+  json_extract(r.data_json,'$.uptime_s') AS uptime_s, json_extract(r.data_json,'$.packets_recv') AS packets_recv,
+  json_extract(r.data_json,'$.packets_sent') AS packets_sent, json_extract(r.data_json,'$.tx_airtime_s') AS tx_airtime_s,
+  json_extract(r.data_json,'$.rx_airtime_s') AS rx_airtime_s, json_extract(r.data_json,'$.tx_queue_len') AS tx_queue_len,
+  json_extract(r.data_json,'$.recv_errors') AS recv_errors, json_extract(r.data_json,'$.err_events') AS err_events,
+  json_extract(r.data_json,'$.flood_dups') AS flood_dups, json_extract(r.data_json,'$.direct_dups') AS direct_dups
+FROM node_reports r LEFT JOIN nodes n ON n.public_key = r.public_key WHERE r.kind = 'status';
 
 CREATE TABLE IF NOT EXISTS tx_frames(
   id INTEGER PRIMARY KEY,
@@ -238,6 +257,19 @@ impl Writer {
         Ok(self.s.c.last_insert_rowid())
     }
 
+    /// Node answering our DISCOVER_REQ: create if unknown (name comes later from adverts or owner info).
+    pub fn upsert_discovered(&self, t: f64, key: &str, adv_type: &str, frame_id: i64, rssi: f32, snr: f32) -> Result<()> {
+        self.s.c.execute(
+            "INSERT INTO nodes(public_key,hash,adv_type,first_heard,last_heard,last_frame_id,receptions,last_rssi,last_snr,last_route,last_path_hops,last_path,last_direct_heard,last_direct_rssi,last_direct_snr)
+             VALUES(?1,substr(?1,1,2),?2,?3,?3,?4,1,?5,?6,'direct',0,'',?3,?5,?6)
+             ON CONFLICT(public_key) DO UPDATE SET last_heard=excluded.last_heard,last_frame_id=excluded.last_frame_id,receptions=receptions+1,
+               last_direct_heard=excluded.last_direct_heard,last_direct_rssi=excluded.last_direct_rssi,last_direct_snr=excluded.last_direct_snr,
+               adv_type=coalesce(adv_type,excluded.adv_type)",
+            params![key, adv_type, t, frame_id, rssi, snr],
+        )?;
+        Ok(())
+    }
+
     /// Learned route to a peer (from its PATH return). path_len = raw byte.
     pub fn set_out_path(&self, key: &str, path_len: u8, path: &[u8]) -> Result<()> {
         self.s.c.execute(
@@ -246,6 +278,18 @@ impl Writer {
         )?;
         Ok(())
     }
+}
+
+/// Store a management report (status, telemetry, neighbours, acl, owner, login). Owner info also fills a missing name.
+pub fn insert_report(c: &Connection, key: &str, kind: &str, data: &Value) -> Result<i64> {
+    c.execute("INSERT INTO node_reports(t,public_key,kind,data_json) VALUES(?1,?2,?3,?4)", params![now(), key, kind, data.to_string()])?;
+    let id = c.last_insert_rowid();
+    if kind == "owner" {
+        if let Some(n) = data["name"].as_str() {
+            c.execute("UPDATE nodes SET name=?2 WHERE public_key=?1 AND (name IS NULL OR name='')", params![key, n])?;
+        }
+    }
+    Ok(id)
 }
 
 /// Learned out paths: (public key, raw path_len, path bytes).
