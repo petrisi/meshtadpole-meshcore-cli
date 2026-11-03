@@ -92,6 +92,8 @@ User=root
 WantedBy=multi-user.target
 ```
 
+`systemctl stop` (SIGTERM) ends the daemon session cleanly (`sessions.ended`); any exit, including a kill or the watchdog's exit 70, is restarted after 5 s. Tested with the v0.1.0 release binary on Ubuntu 26.04 (systemd 259). Logs: `journalctl -u tadpole-mc`.
+
 Non-root: add the udev rule from `meshtadpole-radio` README and set `User=`. Config/DB then live in that user's `~/.local/share/meshtadpole/`.
 
 Windows: Task Scheduler task "At startup", action `tadpole-mc.exe daemon`, settings "If the task fails, restart every 1 minute"; or a service wrapper (e.g. NSSM).
