@@ -11,6 +11,7 @@
 //! - `{"cmd":"login","to":"<key>","password":"..","room":bool}` -> login result (password redacted in logs).
 //! - `{"cmd":"request","to":"<key>","kind":"status|telemetry|neighbours|acl|owner","password":".."}` -> parsed response.
 //! - `{"cmd":"cli","to":"<key>","command":"..","password":".."}` -> command reply text.
+//! - `{"cmd":"trace","path":"aabb,ccdd,aabb","wait_s":f}` -> per-hop SNR along the path.
 
 use crate::config::Config;
 use crate::decode::{Decoded, Keys, Status, decode_frame, to_json};
@@ -56,6 +57,8 @@ enum Match {
     Cli { peer: [u8; 32] },
     /// DISCOVER_RESP carrying our tag.
     Discover(u32),
+    /// Copies of our TRACE (tag): progress and completion.
+    Trace(u32),
 }
 
 /// What a received frame offers to waiters.
@@ -63,6 +66,7 @@ enum Sig {
     Response { peer: [u8; 32], plain: Vec<u8> },
     Cli { peer: [u8; 32], text: String },
     Discover(u32),
+    Trace(u32),
 }
 
 struct Waiter {
@@ -140,6 +144,7 @@ impl Shared {
                                 out = Some(e);
                             }
                             (Match::Discover(t), Sig::Discover(tt)) if t == tt => out = Some(ev.clone()),
+                            (Match::Trace(t), Sig::Trace(tt)) if t == tt => out = Some(ev.clone()),
                             _ => {}
                         }
                     }
@@ -522,6 +527,79 @@ fn cli(sh: &Shared, req: &Value) -> Result<Value> {
     Ok(out)
 }
 
+/// TRACE along `path` (hash prefixes of equal size 1, 2, 4 or 8 bytes). Each listed repeater forwards
+/// it if it is the next entry and appends its receive SNR. We hear copies as it progresses; the copy
+/// whose SNR count equals the hash count is complete (we heard the last hop).
+fn trace(sh: &Shared, req: &Value) -> Result<Value> {
+    let hops: Vec<Vec<u8>> = req["path"]
+        .as_str()
+        .ok_or_else(|| anyhow!("path required"))?
+        .split(',')
+        .map(|h| hex::decode(h.trim()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow!("path: {e}"))?;
+    let hs = hops.first().map(Vec::len).unwrap_or(0);
+    let code = match hs {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        8 => 3,
+        _ => bail!("hash size must be 1, 2, 4 or 8 bytes"),
+    };
+    if hops.iter().any(|h| h.len() != hs) || hops.len() * hs > crate::packet::MAX_PATH_SIZE {
+        bail!("all path entries must have the same size; at most 64 bytes in total");
+    }
+    let tag: u32 = rand::random();
+    let p = mesh::trace(tag, 0, code, &hops.concat());
+    let route = Route::zero_hop();
+    let (wid, rx) = sh.wait_for(Match::Trace(tag));
+    let r = sh.transmit(&p, meta(&p, &route, None, json!({"trace_tag": format!("{tag:08x}"), "path": req["path"]}), 0), Duration::ZERO);
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            sh.unwait(&[wid]);
+            return Err(e);
+        }
+    };
+    let t0 = Instant::now();
+    // Per hop: forward delay + airtime; generous default.
+    let wait = req["wait_s"].as_f64().unwrap_or(2.0 + hops.len() as f64 * (r.airtime_ms / 1000.0 * 2.0 + 1.5));
+    let deadline = t0 + Duration::from_secs_f64(wait);
+    let mut progress = Vec::new();
+    let mut done = None;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(ev) = rx.recv_timeout(left) else { break };
+        let snrs = ev["data"]["snrs"].as_array().cloned().unwrap_or_default();
+        let ms = (t0.elapsed().as_secs_f64() * 1000.0).round();
+        if snrs.len() >= hops.len() {
+            done = Some((ev, snrs, ms));
+            break;
+        }
+        progress.push(json!({"hops_done": snrs.len(), "snrs": snrs, "heard_rssi": ev["rssi"], "heard_snr": ev["snr"], "t_ms": ms}));
+    }
+    sh.unwait(&[wid]);
+    let mut out = json!({"tag": format!("{tag:08x}"), "path": req["path"], "transmission": report_json(&r, 0, &route), "progress": progress});
+    match done {
+        Some((ev, snrs, ms)) => {
+            let hops_json: Vec<Value> = hops
+                .iter()
+                .zip(snrs.iter())
+                .map(|(h, s)| json!({"hash": hex::encode(h), "snr_db": s}))
+                .collect();
+            out["complete"] = json!(true);
+            out["hops"] = json!(hops_json);
+            out["final_snr_db"] = ev["snr"].clone();
+            out["final_rssi"] = ev["rssi"].clone();
+            out["rtt_ms"] = json!(ms);
+            if let Ok(c) = store::open_rw(&sh.db) {
+                let _ = store::insert_report(&c, "", "trace", &out);
+            }
+        }
+        None => out["complete"] = json!(false),
+    }
+    Ok(out)
+}
+
 fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -554,6 +632,7 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         }),
         "request" => request(sh, &req),
         "cli" => cli(sh, &req),
+        "trace" => trace(sh, &req),
         other => Err(anyhow!("unknown cmd {other:?}")),
     };
     let out = res.unwrap_or_else(|e| json!({"error": format!("{e:#}")}));
@@ -607,7 +686,11 @@ fn signals(d: &Decoded) -> Vec<Sig> {
             let end = b[5..].iter().position(|&x| x == 0).map(|i| 5 + i).unwrap_or(b.len());
             v.push(Sig::Cli { peer: *peer, text: String::from_utf8_lossy(&b[5..end]).into_owned() });
         }
+        (ptype::TRACE, _) if p.payload.len() >= 9 => {
+            v.push(Sig::Trace(u32::from_le_bytes([p.payload[0], p.payload[1], p.payload[2], p.payload[3]])));
+        }
         (ptype::CONTROL, _) if p.payload.len() >= 6 && p.payload[0] >> 4 == 0x9 => {
+
             v.push(Sig::Discover(u32::from_le_bytes([p.payload[2], p.payload[3], p.payload[4], p.payload[5]])));
         }
         _ => {}

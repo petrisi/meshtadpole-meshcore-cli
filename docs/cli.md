@@ -49,7 +49,7 @@ Passwords: config `passwords`, keyed by node name or public key prefix; redacted
 
 | Command | Effect |
 |---|---|
-| `discover [--types repeater,room,chat,sensor] [--wait S]` | zero-hop DISCOVER_REQ; direct neighbours answer with full key, type and the SNR they hear us at (`snr_at_node_db`). Answering nodes are added to `nodes` (name from adverts or owner info later). Nodes may be configured not to answer |
+| `discover [--types repeater,room,chat,sensor] [--wait S]` | zero-hop DISCOVER_REQ; direct neighbours answer with full key, type and the SNR they hear us at (`snr_at_node_db`). Answering nodes are added to `nodes` (name from adverts or owner info later). Nodes may be configured not to answer, and the firmware rate-limits replies: one empty attempt does not prove absence; repeat after a while |
 | `login NODE [--password P]` | ANON_REQ login; result: ok, role (guest/read_only/read_write/admin), permissions, server_time, firmware_ver_level, rtt_ms. A wrong password gets no reply (`ok: false` after timeout). Login adds us to the node's ACL |
 | `request NODE status\|telemetry\|neighbours\|acl\|owner [--retries N]` | logs in first if not logged in this daemon session. status: RepeaterStats (batt_mv, noise_floor_dbm, packet/airtime counters, uptime_s, dups, errors). telemetry: Cayenne LPP sensors. neighbours: all pages, strongest first (key_prefix 6 bytes, heard_s_ago, snr_db). acl: key prefixes and roles (admin only). owner: firmware, name, owner_info (fills a missing node name) |
 | `cmd NODE 'COMMAND' [--retries N] [--wait S]` | remote CLI (admin): e.g. `ver`, `clock`, `get radio`, `get repeat`, `set owner.info ...`, `neighbors`. Reply text returned. Default no retry (a retry executes again) |
@@ -58,7 +58,17 @@ Routing: direct along the learned path when known (learned from the node's PATH 
 
 Writes: plan, read before, write, read back, restore when testing. Disruptive settings (radio parameters, `prv.key`, `password`, `reboot`, `erase`, region, repeat off) can cut the node off the mesh; avoid unless intended.
 
+## Diagnostics
+
+| Command | Effect |
+|---|---|
+| `trace PATH [--no-return] [--hash-size 1\|2\|4\|8] [--wait S]` | TRACE along repeaters (names or key prefixes). Round trip by default: `A,B` is sent as `A,B,A` so the result comes back to us. Each hop appends the SNR it received at. Returns `hops` [{hash, name, snr_db}], `final_snr_db`/`final_rssi` (last hop to us), rtt_ms, and `progress` (copies heard while under way). Needs: first hop hears us, each hop hears the previous, we hear the last. Stored in node_reports (kind `trace`) |
+| `topology [--since S] [--sources path,neighbours,trace,discover]` | directed link graph (edge from->to: `to` received `from`), offline. Sources: flood paths in rx_frames (origin -> hops -> us; RF values only for the last hop to us), latest neighbour report per repeater (SNR measured by the reporter; heard time within --since), traces (SNR per hop), discover replies (both directions). Edge fields: count, last, snr_avg, snr_min, rssi_avg, source. Nodes: full key when a prefix matches exactly one known key; else `prefix:<hex>` using the longest consistent prefix seen (2-byte path hashes and 6-byte neighbour prefixes of one node merge); `ambiguous` lists candidate keys when a prefix matches several |
+
+Hash collisions: with 1-byte path hashes many nodes share a hash. Use `topology` `ambiguous`, or `sql "SELECT name, public_key FROM nodes WHERE hash='aa'"`.
+
 ## Queries (read-only, daemon not required)
+
 
 
 | Command | Effect |

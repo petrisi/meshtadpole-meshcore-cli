@@ -78,7 +78,7 @@ Our own adverts heard back are stored in rx_frames (with tx_id) but not as a nod
 
 ## node_reports
 
-Management results, one row per successful login/request/CLI command: t, public_key, kind (`login`, `status`, `telemetry`, `neighbours`, `acl`, `owner`, `cli`), data_json (parsed result as returned by the CLI). Nodes added by DISCOVER have no name until an advert or owner report.
+Management results, one row per successful login/request/CLI command: t, public_key, kind (`login`, `status`, `telemetry`, `neighbours`, `acl`, `owner`, `cli`, `trace` with empty public_key), data_json (parsed result as returned by the CLI). Nodes added by DISCOVER have no name until an advert or owner report.
 
 ## tx_frames
 

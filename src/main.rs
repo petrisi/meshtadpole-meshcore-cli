@@ -6,6 +6,7 @@ mod mesh;
 mod packet;
 mod repeater;
 mod store;
+mod topology;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -165,6 +166,30 @@ enum Cmd {
         /// Extra seconds to wait for the reply beyond the firmware timeout.
         #[arg(long, default_value_t = 5.0)]
         wait: f64,
+    },
+    /// TRACE along repeaters, returning the SNR each hop received at. PATH: comma list of names / key
+    /// prefixes. Round trip by default (A,B -> A,B,A) so the result returns to us; the first hop must
+    /// hear us and we must hear the last.
+    Trace {
+        path: String,
+        /// Do not mirror the path.
+        #[arg(long)]
+        no_return: bool,
+        /// Hash bytes per hop: 1, 2, 4 or 8.
+        #[arg(long, default_value_t = 2)]
+        hash_size: usize,
+        #[arg(long)]
+        wait: Option<f64>,
+    },
+    /// Directed link graph from stored flood paths, neighbour reports, traces and discover replies.
+    /// Edge from->to: `to` received `from`. Offline (database only).
+    Topology {
+        /// Evidence newer than N seconds [default: 86400].
+        #[arg(long, default_value_t = 86400.0)]
+        since: f64,
+        /// Only edges from these sources (comma list: path, neighbours, trace, discover).
+        #[arg(long)]
+        sources: Option<String>,
     },
     /// Read-only SQL against the database. Rows as JSON array.
     Sql { query: String },
@@ -532,7 +557,58 @@ fn run(cli: &Cli) -> Result<()> {
                 daemon::call(&cfg.api, &req)
             }));
         }
+        Cmd::Trace { path, no_return, hash_size, wait } => {
+            if ![1, 2, 4, 8].contains(hash_size) {
+                bail!("--hash-size must be 1, 2, 4 or 8");
+            }
+            let mut hops = Vec::new();
+            for p in path.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                let is_hex = p.chars().all(|c| c.is_ascii_hexdigit()) && p.len() == hash_size * 2;
+                let key = if is_hex { p.to_lowercase() } else { resolve_node(&db_path, p)? };
+                if key.len() < hash_size * 2 {
+                    bail!("{p}: key prefix shorter than hash size");
+                }
+                hops.push(key[..hash_size * 2].to_string());
+            }
+            if hops.is_empty() {
+                bail!("empty path");
+            }
+            if !no_return && hops.len() > 1 {
+                let back: Vec<String> = hops[..hops.len() - 1].iter().rev().cloned().collect();
+                hops.extend(back);
+            }
+            let mut req = json!({"cmd": "trace", "path": hops.join(",")});
+            if let Some(w) = wait {
+                req["wait_s"] = json!(w);
+            }
+            let mut v = daemon::call(&cfg.api, &req)?;
+            // Names for hops.
+            if let (Ok(c), Some(hs)) = (store::open_ro(&db_path), v["hops"].as_array_mut()) {
+                for h in hs {
+                    let p = h["hash"].as_str().unwrap_or_default().to_string();
+                    if let Ok(r) = store::query_json(&c, "SELECT name FROM nodes WHERE public_key LIKE ?1 || '%'", &[&p]) {
+                        if r.len() == 1 {
+                            h["name"] = r[0]["name"].clone();
+                        }
+                    }
+                }
+            }
+            print(&v);
+        }
+        Cmd::Topology { since, sources } => {
+            let c = store::open_ro(&db_path)?;
+            let me = cfg.identity()?.map(|i| i.public_hex());
+            let mut v = topology::build(&c, store::now() - since, me.as_deref())?;
+            if let Some(s) = sources {
+                let keep: Vec<&str> = s.split(',').map(str::trim).collect();
+                if let Some(e) = v["edges"].as_array_mut() {
+                    e.retain(|x| keep.contains(&x["source"].as_str().unwrap_or_default()));
+                }
+            }
+            print(&v);
+        }
         Cmd::Sql { query } => {
+
 
             let c = store::open_ro(&db_path)?;
             print(&json!(store::query_json(&c, query, &[])?));

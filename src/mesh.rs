@@ -94,7 +94,18 @@ pub fn anon_req(me: &Identity, peer: &[u8; 32], plain: &[u8], route: &Route) -> 
     Ok(finish(ptype::ANON_REQ, pl, route))
 }
 
+/// TRACE: tag, auth code, flags (bits 0-1: hash size = 1 << n bytes), then the hashes to visit.
+/// Sent direct with an empty path; each repeater appends its receive SNR x4 to the path.
+pub fn trace(tag: u32, auth: u32, hash_size_code: u8, hashes: &[u8]) -> Packet {
+    let mut pl = tag.to_le_bytes().to_vec();
+    pl.extend(auth.to_le_bytes());
+    pl.push(hash_size_code & 3);
+    pl.extend(hashes);
+    finish(ptype::TRACE, pl, &Route::zero_hop())
+}
+
 /// Control packet (e.g. DISCOVER_REQ), unencrypted.
+
 pub fn control(payload: Vec<u8>, route: &Route) -> Packet {
     finish(ptype::CONTROL, payload, route)
 }
