@@ -145,6 +145,9 @@ enum Cmd {
         node: String,
         #[arg(long)]
         password: Option<String>,
+        /// Room servers: push posts from the last N seconds (default: only posts after login).
+        #[arg(long)]
+        since: Option<u64>,
     },
     /// Management request to repeaters/room servers: status, telemetry, neighbours, acl, owner.
     /// Logs in first when needed and a password is configured. NODE: name, key prefix, comma list or @group.
@@ -558,11 +561,15 @@ fn run(cli: &Cli) -> Result<()> {
             }
             print(&daemon::call(&cfg.api, &json!({"cmd": "discover", "type_filter": filter, "wait_s": wait}))?);
         }
-        Cmd::Login { node, password } => {
+        Cmd::Login { node, password, since } => {
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
                 let pw = password.clone().or_else(|| cfg.password_for(name.as_deref(), key)).ok_or_else(|| anyhow!("no password for {} in config `passwords`", name.as_deref().unwrap_or(key)))?;
-                daemon::call(&cfg.api, &json!({"cmd": "login", "to": key, "password": pw, "room": t.as_deref() == Some("room")}))
+                let mut req = json!({"cmd": "login", "to": key, "password": pw, "room": t.as_deref() == Some("room")});
+                if let Some(s) = since {
+                    req["since"] = json!((store::now() as u64).saturating_sub(*s));
+                }
+                daemon::call(&cfg.api, &req)
             }));
         }
         Cmd::Request { node, kind, retries } => {

@@ -71,7 +71,7 @@ One row per public key, from verified adverts.
 | first_heard, last_heard, last_frame_id | any reception of its adverts |
 | adverts_heard, receptions | distinct adverts; all copies |
 | last_rssi, last_snr, last_route, last_path_hops, last_path | last received copy |
-| last_direct_heard, last_direct_rssi, last_direct_snr | last copy with 0 hops (heard directly from the node) |
+| last_direct_heard, last_direct_rssi, last_direct_snr | last advert copy with 0 hops. Caveat: companions can re-send a stored contact's advert zero hop ("share contact"), and a direct-routed packet arrives with an empty path after its last hop; 0 hops then describes the last transmitter, not the node itself |
 | out_path, out_path_len, out_path_time | route to the node learned from its PATH return: path bytes (hex), raw path_len byte (bits 0-5 hops, 6-7 hash size - 1), time |
 
 Our own adverts heard back are stored in rx_frames (with tx_id) but not as a node.

@@ -361,13 +361,14 @@ fn discover(sh: &Shared, req: &Value) -> Result<Value> {
 }
 
 /// Login (ANON_REQ with password). Retries with a fresh timestamp (firmware replay protection).
-fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, retries: u32) -> Result<Value> {
+/// `room_since`: room servers push posts newer than this (Unix time); None = from now.
+fn login(sh: &Shared, peer: [u8; 32], password: &str, room: bool, room_since: Option<u32>, retries: u32) -> Result<Value> {
     let me = sh.me()?;
     let mut txs = Vec::new();
     for attempt in 0..=retries {
         let route = if attempt == retries && attempt > 0 { sh.flood() } else { sh.route_to(&peer) };
         let ts = sh.timestamp();
-        let plain = repeater::login_plain(ts, password, room.then_some(ts));
+        let plain = repeater::login_plain(ts, password, room.then_some(room_since.unwrap_or(ts)));
         let p = mesh::anon_req(&me, &peer, &plain, &route)?;
         let (wid, rx) = sh.wait_for(Match::Response { peer, tag: None });
         let m = meta(&p, &route, Some(hex::encode(peer)), json!({"login": true, "attempt": attempt}), attempt);
@@ -399,7 +400,7 @@ fn ensure_login(sh: &Shared, peer: [u8; 32], req: &Value) -> Result<Option<Value
         return Ok(None);
     }
     let Some(pw) = req["password"].as_str() else { return Ok(None) };
-    let v = login(sh, peer, pw, req["room"].as_bool().unwrap_or(false), 1)?;
+    let v = login(sh, peer, pw, req["room"].as_bool().unwrap_or(false), None, 1)?;
     if v["ok"] != true {
         bail!("login failed: {v}");
     }
@@ -652,7 +653,8 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "discover" => discover(sh, &req),
         "login" => peer_key(&req).and_then(|p| {
             let pw = req["password"].as_str().ok_or_else(|| anyhow!("password required"))?;
-            login(sh, p, pw, req["room"].as_bool().unwrap_or(false), req["retries"].as_u64().unwrap_or(1) as u32)
+            let since = req["since"].as_u64().map(|s| s as u32);
+            login(sh, p, pw, req["room"].as_bool().unwrap_or(false), since, req["retries"].as_u64().unwrap_or(1) as u32)
         }),
         "request" => request(sh, &req),
         "cli" => cli(sh, &req),
