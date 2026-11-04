@@ -2,7 +2,7 @@
 
 Host-side MeshCore node for the MeshTadpole SX1262 USB stick. Binary: `tadpole-mc`. Windows, Linux.
 
-Target users: AI agents and engineers operating dense MeshCore networks. The CLI is an interface to the mesh; analysis is done by the caller.
+Target users: AI agents and engineers operating MeshCore networks. The CLI is an interface to the mesh; analysis is done by the caller.
 
 ## Architecture
 
