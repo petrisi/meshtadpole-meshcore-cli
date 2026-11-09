@@ -307,12 +307,22 @@ fn main() {
     }
 }
 
+/// Our public key (hex): derived from `node.private_key`, or, in a config without it (a client config that leaves
+/// the secret to the daemon), the running daemon's.
+fn own_public_hex(cfg: &Config) -> Result<Option<String>> {
+    if let Some(i) = cfg.identity()? {
+        return Ok(Some(i.public_hex()));
+    }
+    Ok(daemon::call(&cfg.api, &json!({"cmd": "status"})).ok().and_then(|s| s["public_key"].as_str().map(str::to_string)))
+}
+
 fn identity_json(cfg: &Config) -> Result<Value> {
-    let id = cfg.identity()?;
+    let pk = own_public_hex(cfg)?;
     Ok(json!({
         "name": cfg.node.name, "adv_type": cfg.node.adv_type,
-        "public_key": id.as_ref().map(|i| i.public_hex()),
-        "hash": id.as_ref().map(|i| format!("{:02x}", i.public[0])),
+        "public_key": pk,
+        "hash": pk.as_ref().map(|k| k[..2].to_string()),
+        "private_key_in_config": cfg.node.private_key.is_some(),
         "latitude": cfg.node.latitude, "longitude": cfg.node.longitude,
     }))
 }
@@ -735,7 +745,7 @@ fn run(cli: &Cli) -> Result<()> {
         }
         Cmd::Topology { since, sources } => {
             let c = store::open_ro(&db_path)?;
-            let me = cfg.identity()?.map(|i| i.public_hex());
+            let me = own_public_hex(&cfg)?;
             let mut v = topology::build(&c, store::now() - since, me.as_deref())?;
             if let Some(s) = sources {
                 let keep: Vec<&str> = s.split(',').map(str::trim).collect();

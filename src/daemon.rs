@@ -530,13 +530,26 @@ fn join_room(sh: &Shared, peer: [u8; 32], password: &str, since: u32) {
     r.last_error = None;
 }
 
-/// Log in first when not logged in this daemon session and a password is given.
+/// The password for `peer`: the request's, else the daemon's config `passwords` (by node name or key prefix), so
+/// clients can work with a config that leaves passwords to the daemon.
+fn req_password(sh: &Shared, peer: [u8; 32], req: &Value) -> Option<String> {
+    if let Some(p) = req["password"].as_str() {
+        return Some(p.to_string());
+    }
+    let kh = hex::encode(peer);
+    let name: Option<String> = store::open_ro(&sh.db)
+        .ok()
+        .and_then(|c| c.query_row("SELECT name FROM nodes WHERE public_key=?1", [&kh], |r| r.get(0)).ok().flatten());
+    sh.cfg.password_for(name.as_deref(), &kh)
+}
+
+/// Log in first when not logged in this daemon session and a password is known (request or daemon config).
 fn ensure_login(sh: &Shared, peer: [u8; 32], req: &Value) -> Result<Option<Value>> {
     if sh.logins.lock().unwrap().contains_key(&peer) {
         return Ok(None);
     }
-    let Some(pw) = req["password"].as_str() else { return Ok(None) };
-    let v = login(sh, peer, pw, req["room"].as_bool().unwrap_or(false), None, 1)?;
+    let Some(pw) = req_password(sh, peer, req) else { return Ok(None) };
+    let v = login(sh, peer, &pw, req["room"].as_bool().unwrap_or(false), None, 1)?;
     if v["ok"] != true {
         bail!("login failed: {v}");
     }
@@ -982,9 +995,9 @@ fn handle_line(line: &str, w: &mut TcpStream, sh: &Shared) -> std::io::Result<()
         "send_channel" => send_channel(sh, &req),
         "discover" => discover(sh, &req),
         "login" => peer_key(&req).and_then(|p| {
-            let pw = req["password"].as_str().ok_or_else(|| anyhow!("password required"))?;
+            let pw = req_password(sh, p, &req).ok_or_else(|| anyhow!("password required (request or daemon config passwords)"))?;
             let since = req["since"].as_u64().map(|s| s as u32);
-            login(sh, p, pw, req["room"].as_bool().unwrap_or(false), since, req["retries"].as_u64().unwrap_or(1) as u32)
+            login(sh, p, &pw, req["room"].as_bool().unwrap_or(false), since, req["retries"].as_u64().unwrap_or(1) as u32)
         }),
         "request" => request(sh, &req),
         "cli" => cli(sh, &req),

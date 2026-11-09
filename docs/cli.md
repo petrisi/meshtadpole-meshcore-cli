@@ -10,7 +10,7 @@ All output is JSON on stdout. Errors: `{"error": "..."}` on stderr, exit code 1 
 | `config` | effective config (private key redacted), derived LoRa parameters, channel hashes |
 | `config --write` | write effective config (defaults on first use) |
 | `config --set PATH=VALUE` | set by dotted path, value as JSON else string; validated; restart daemon to apply. `node.private_key` cannot be set this way |
-| `identity` | name, adv_type, public key, hash |
+| `identity` | name, adv_type, public key, hash (without `node.private_key` in the config: the running daemon's), `private_key_in_config` |
 | `identity --generate [--force]` | create key pair in the config file; refused if one exists unless `--force` (old identity lost) |
 
 Config keys: `node.{name, adv_type, private_key, latitude, longitude, duty_cycle_limit, duty_cycle_enforce, path_hash_size, flood_scope, room_keepalive_s, telemetry.{base, location}}`, `radio.{frequency_mhz, bandwidth_khz, spreading_factor, coding_rate, tx_power_dbm, rx_boosted_gain, agc_reset_interval_s}`, `channels` (array of `{name, key?}`; key base64 or hex, 16/32 bytes; omitted for `#name`), `api`, `usb_serial`, `groups.<name>` (node lists).
@@ -51,7 +51,7 @@ Automatic replies to frames addressed to us (first reception only):
 
 ## Management (repeaters, room servers; daemon required)
 
-Passwords: config `passwords`, keyed by node name or public key prefix; redacted in all output and in the `requests` log. Prefer the key prefix (8 hex digits): owners rename nodes, and a name key stops matching. Set with `config --set 'passwords.9734c10d=...'`. NODE: name, key prefix, comma list or `@group` (config `groups`); several targets return `{"targets":[{node, name, ok, result|error}]}`.
+Passwords: config `passwords`, keyed by node name or public key prefix; redacted in all output and in the `requests` log. Prefer the key prefix (8 hex digits): owners rename nodes, and a name key stops matching. Set with `config --set 'passwords.9734c10d=...'`. A request without a password uses the daemon's config `passwords`, so clients may use a config without `passwords` and `node.private_key` (secrets readable by the daemon's user only). NODE: name, key prefix, comma list or `@group` (config `groups`); several targets return `{"targets":[{node, name, ok, result|error}]}`.
 
 | Command | Effect |
 |---|---|
