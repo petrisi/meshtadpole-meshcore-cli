@@ -173,7 +173,7 @@ enum Cmd {
         #[arg(long, default_value_t = 8.0)]
         wait: f64,
     },
-    /// Log in to a repeater / room server with the password from config `passwords` (or --password).
+    /// Log in to a repeater / room server with --password, else config `passwords`, else the daemon's config `passwords`.
     Login {
         node: String,
         #[arg(long)]
@@ -667,11 +667,12 @@ fn run(cli: &Cli) -> Result<()> {
         Cmd::Login { node, password, since } => {
             let targets = resolve_targets(&cfg, &db_path, node)?;
             print(&for_targets(&targets, |(key, name, t)| {
-                let pw = password
-                    .clone()
-                    .or_else(|| cfg.password_for(name.as_deref(), key))
-                    .ok_or_else(|| anyhow!("no password for {} in config `passwords`", name.as_deref().unwrap_or(key)))?;
-                let mut req = json!({"cmd": "login", "to": key, "password": pw, "room": t.as_deref() == Some("room")});
+                // Without a password here (a client config that leaves passwords to the daemon) the daemon uses its own.
+                let pw = password.clone().or_else(|| cfg.password_for(name.as_deref(), key));
+                let mut req = json!({"cmd": "login", "to": key, "room": t.as_deref() == Some("room")});
+                if let Some(pw) = pw {
+                    req["password"] = json!(pw);
+                }
                 if let Some(s) = since {
                     req["since"] = json!((store::now() as u64).saturating_sub(*s));
                 }
