@@ -183,7 +183,8 @@ enum Cmd {
         since: Option<u64>,
     },
     /// Management request to repeaters/room servers: status, telemetry, neighbours, acl, owner.
-    /// Logs in first when needed and a password is configured. NODE: name, key prefix, comma list or @group.
+    /// The daemon logs in first when not logged in this session (password from this config, else the daemon's
+    /// config): do not run `login` before. NODE: name, key prefix, comma list or @group.
     /// Results are stored in node_reports.
     Request {
         node: String,
@@ -192,7 +193,8 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         retries: u32,
     },
-    /// Remote CLI command (admin login required), e.g. `cmd 'Vuores North' 'get radio'`. Reply text returned.
+    /// Remote CLI command (admin login required; logs in first like `request`), e.g. `cmd 'Vuores North' 'get radio'`.
+    /// Reply text returned.
     /// Not retried by default: a retry executes the command again. Read-only commands, advert triggers,
     /// `clock sync` and `set` on safe keys run as given; anything else (reboot, erase, ota, password,
     /// radio/tx/repeat settings, ...) needs --allow-disruptive. Secret values/replies are redacted.
